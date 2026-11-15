@@ -1,4 +1,4 @@
-# Pendragon Solo Companion v0.3.3
+# Pendragon Solo Companion v0.3.4
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
@@ -13,6 +13,7 @@ node build.mjs
 node --test test/*.test.mjs
 node test/campaign-sweep.mjs
 node test/campaign-sweep.mjs --fresh
+node test/campaign-sweep.mjs --seed-block=735000 --tactics=last
 ```
 
 Supply a second output path to verify the distributed HTML with a separate build.
@@ -29,6 +30,8 @@ cmp dist/index.html /tmp/pendragon-rebuild.html
 - Start a physical-deck game as Civitates with #57 Myrddin current and #22 next. Select a revealed card's title to read its effect. Preview the Scotti action to see the Command and Feat the bot selects for Myrddin. If a Battle needs your faction's tactics, the app asks for them before showing the result.
 - Open **Saves → New game** to select a scenario, seat, difficulty, and deck. Petty Tyrants applies Entropy during setup if you select Both Britons. The map and list show faction forces and Strongholds. **Choose on map** fills a Command target from its available spaces. Use the Board correction controls to match a physical position or record a tabletop ruling.
 - Open **Victory outlook** to see current margins and requirements. At the Victory phase the preview shows whether play continues or who wins before you apply it. Non-player previews show the applicable decision rule next to their recorded rolls.
+- Open **Battle calculations** in an Assault preview to see what each side inflicted and which units were removed in Escalade and Storm. Annona lists the groups the bot Dux covers before you choose payments and shows the Civitates share in Resources and Wealth.
+- Filter the **Journal** by card, Epoch, acting faction, or a space mentioned in the entry. Search the entries by text, including recorded die rolls. If a bot preview stops, the error dialog lets you retry or export a diagnostic save for that position.
 
 ## Rules coverage
 
@@ -49,9 +52,11 @@ Under shaded #16 Dux Bellorum, Civitates-led attacks with Militia leave Dux unit
 
 ## Verification
 
-The 161 scripted tests include three natural v0.3.2 Mistborn saves. They also check withdrawals and Cair Legion admission, Escalade cargo, shared Briton losses, Saxon Ravage, Scotti Trap, multi-origin Dux March, the Civitates Town Muster priority, and Wealth payments in Epoch Annona and shaded #10. Earlier Battle, Event, scenario, and save tests also pass.
+The 170 scripted tests include the natural March blocker at seed 736202, the unshaded #33 Escalade result and its neighboring cases, and Dux-first payments during Epoch Annona and shaded #10. The three earlier Mistborn saves and the other Battle, Event, scenario, and save tests also pass.
 
-Each campaign sweep runs every combination of scenario, seat, and difficulty with two simple policies. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. Both policies use default tactical answers. All 192 baseline games and all 192 games with distinct audit seeds reached scoring in v0.3.3. The sweeps resolved 12,475 bot turns and exercised all 76 ordinary and Pivotal Event IDs between them.
+Each campaign sweep runs every combination of scenario, seat, and difficulty with two simple policies. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. The sweep accepts `--tactics=first` or `--tactics=last` to exercise choices other than the defaults. If a planner fails, the summary includes the path to an importable save.
+
+All 960 games across five v0.3.4 sweeps reached scoring. Those runs used the baseline, `--fresh`, seed block 733000 with defaults, seed block 735000 with last choices, and seed block 737000 with first choices. They completed 31,896 bot turns and exercised all 76 ordinary and Pivotal Event IDs.
 
 ## References
 

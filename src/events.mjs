@@ -823,7 +823,9 @@ function compiledEvent(state,id,faction,side,input) {
 }
 export function eventChoices(state,id,faction,side,input={}) {
   const descriptor = compiledEvent(state,id,faction,side,input)
-  return descriptor ? {help:descriptor.help,fields:descriptor.fields,needsBattle:Boolean(descriptor.requests?.length)} : null
+  if (!descriptor) return null
+  const {help,fields,annona,requests} = descriptor
+  return {help,fields,needsBattle:Boolean(requests?.length),...(annona ? {annona} : {})}
 }
 export const canCalculateEvent = (state,id,faction,side) => Boolean(compiledEvent(state,id,faction,side,{}))
 export function runEvent(state,id,faction,side,input={},roll) {
@@ -1414,11 +1416,13 @@ function eventAcculturation(state,input,side) {
 }
 
 function eventAnnona(state,input) {
-  const {help,fields} = annonaChoices(state,input,'x')
-  return perform(help,roll => {
-    const plan = planAnnona(state,input,roll,'x')
-    return resolveAnnona(state,plan.paid,plan)
-  },fields)
+  return {
+    ...annonaChoices(state,input,'x'),
+    run(roll) {
+      const plan = planAnnona(state,input,roll,'x')
+      return resolveAnnona(state,plan.paid,plan)
+    },
+  }
 }
 function eventRomanitas(state,input,side) {
   if (side === 'unshaded') {

@@ -11,6 +11,7 @@ import { makeRoller, planBotGrant, planRaid } from './bots.mjs'
 export function replayAction(state,job,answers=[]) {
   const after = clone(job.origin ?? state)
   const data = job.descriptionText ? [job.descriptionText] : []
+  const battles = []
   const dice = [...(job.dice || [])]
   const roll = makeRoller(after,dice)
   const overrides = {...job.overrides}
@@ -63,7 +64,8 @@ export function replayAction(state,job,answers=[]) {
     }
     if (config.reactionFaction) data.push(NAMES[config.reactionFaction]+' forces Battle in '+config.name+'.')
     const report = runBattle(after,config,roll,reply)
-    data.push(...report.details)
+    if (report.details.length) data.push(report.name+' · '+report.details.join(' '))
+    if (report.assaults.length) battles.push({name:report.name,assaults:report.assaults})
     if (config.afterDeepRaid) finishDeepRaid(config,Math.max(0,report.attackingRaiderSurvivors-report.attackerPlunder),report.attackerEvaded)
     return report
   }
@@ -137,7 +139,7 @@ export function replayAction(state,job,answers=[]) {
     const detail = data.filter(Boolean).join(' ')
     if (job.kind === 'action') finishAction(after,job.option,job.description,detail.slice(0,2940),dice,overrides)
     if (job.kind === 'sample') log(after,'Sample Battle',detail.slice(0,2940),dice)
-    return {after,dice,detail}
+    return {after,dice,detail,battles}
   } catch (error) {
     if (error instanceof BattleChoice) return {prompt:error.prompt,dice}
     throw error

@@ -147,6 +147,7 @@ export function runBattle(state,config,roll,reply = null) {
   const [attacking,defending] = battleSides(state,attacker,defender)
   const civilBattle = !isFragmentation(state) && attacking.every(briton) && defending.every(briton)
   const details = []
+  const assaults = []
   const bellorum = (units,lead,fortDefends = false) => {
     if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
       !(fortDefends || units.some(unit => unit.owner === 'd'))) return units
@@ -212,13 +213,15 @@ export function runBattle(state,config,roll,reply = null) {
     if (affectedWarband(unit)) value /= 2
     return value / (omens.field.has(unit.id) ? 2 : 1)
   }
-  // One damage unit is a quarter loss. Multiply by two again when some effects stack.
-  const strikeOf = (unit,phase,survives = stillPresent) => {
-    if (phase === 'field') return fieldUnit(unit,survives)*2+(alliedStriker(unit,survives) ? (omens.field.has(unit.id) ? 2 : 4) : 0)
-    let value = 8+(alliedStriker(unit) ? 4 : 0)
-    if (affectedWarband(unit)) value /= 2
-    if (omens.assault.has(unit.id)) value /= 2
-    return value
+  // Strikes and loss budgets use eighths of a loss.
+  const fieldStrike = (unit,survives = stillPresent) => {
+    const bonus = alliedStriker(unit,survives) ? (omens.field.has(unit.id) ? 2 : 4) : 0
+    return fieldUnit(unit,survives)*2 + bonus
+  }
+  const assaultBonus = unit => alliedStriker(unit) ? 4 : 0
+  const assaultStrike = (unit,base = 8) => {
+    const divisor = (affectedWarband(unit) ? 2 : 1) * (omens.assault.has(unit.id) ? 2 : 1)
+    return (base + assaultBonus(unit)) / divisor
   }
   const lossOf = (unit,phase,survives = stillPresent) => {
     let value = phase === 'field' ? fieldUnit(unit,survives)*2 : 8 / (affectedWarband(unit) ? 2 : 1) / (omens.assault.has(unit.id) ? 2 : 1)
@@ -231,7 +234,7 @@ export function runBattle(state,config,roll,reply = null) {
     const group = units => {
       const groups = new Map()
       for (const unit of present(units)) {
-        const strike = qty(strikeOf(unit,'field')/2)
+        const strike = qty(fieldStrike(unit)/2)
         const absorbs = qty(lossOf(unit,'field')/2)
         const key = `${unit.key}/${strike}/${absorbs}`
         if (!groups.has(key)) groups.set(key,{key:unit.key,count:0,plunder:0,withdrawn:0,strike,absorbs})
@@ -246,7 +249,7 @@ export function runBattle(state,config,roll,reply = null) {
       activeSide(state,7,'unshaded') && 'Cair Legion allows delayed Cavalry withdrawal',
       activeSide(state,16,'unshaded') && 'Dux Bellorum can strengthen cooperating Militia',
       activeSide(state,16,'shaded') && 'Dux Bellorum separates Militia and Dux pieces',
-      activeSide(state,33,'unshaded') && 'Fellowship of the Round Table increases cooperating strikes',
+      activeSide(state,33,'unshaded') && 'With the Cross on his Shoulders increases cooperating strikes',
       activeSide(state,46,'shaded') && BY_NAME[name].terrain === 'Fens' && 'Cavalry are halved in Fens',
       present(participants).some(traps) && 'Eligible attackers Strike at Trap',
       activeSide(state,64,'unshaded') && 'Devastation halves eligible native Warbands',
@@ -358,7 +361,7 @@ export function runBattle(state,config,roll,reply = null) {
     const aHits = a.filter(unit => !spent.has(unit.id) && selector(unit))
     const dHits = d.filter(unit => !spent.has(unit.id) && selector(unit))
     if (!aHits.length && !dHits.length) return
-    const hits = units => units.reduce((total,unit) => total+strikeOf(unit,'field',survives),0)
+    const hits = units => units.reduce((total,unit) => total+fieldStrike(unit,survives),0)
     const aLoss = hits(dHits)
     const dLoss = hits(aHits)
     for (const unit of [...aHits,...dHits]) spent.add(unit.id)
@@ -409,18 +412,35 @@ export function runBattle(state,config,roll,reply = null) {
   const sortedSites = [...sites].sort(siteSort)
   const onlySite = config.onlySite ?? config.allowedAssaultSite
   const insideOf = site => present(defenders).filter(unit => unit.site === site.index)
-  const escaladeHits = (site,inside) => site.garrison*site.escalade*2 + inside.reduce((total,unit) => total+site.escalade*strikeOf(unit,'escalade')/4,0)
-  const stormHits = (site,inside) => site.garrison*8 + inside.reduce((total,unit) => total+strikeOf(unit,'storm'),0)
+  const escaladeBase = site => site.escalade*2
+  const assaultHits = (units,base = 8,garrison = 0) =>
+    garrison*base + units.reduce((total,unit) => total+assaultStrike(unit,base),0)
+  function describeAssaultVolley(units,base,garrison,hits) {
+    const strikes = new Map()
+    for (const unit of units) {
+      const bonus = assaultBonus(unit)
+      const modifiers = [
+        bonus ? '#33 With the Cross on his Shoulders' : null,
+        affectedWarband(unit) ? '#64 Devastation' : null,
+        omens.assault.has(unit.id) ? '#43 Omens' : null,
+      ].filter(Boolean)
+      const loss = assaultStrike(unit,base)/8
+      const key = [unit.key,bonus,...modifiers].join('/')
+      if (!strikes.has(key)) strikes.set(key,{key:unit.key,count:0,base:base/8,bonus:bonus/8,loss,modifiers})
+      strikes.get(key).count++
+    }
+    return {garrison,garrisonStrike:base/8,units:[...strikes.values()],hits:hits/8}
+  }
   const automaticCoup = config.assumeCoup && config.source === 'Event Battle' && onlySite !== undefined
   const coupPossible = (site,inside) => config.surprise && (automaticCoup || site.coupCapacity-inside.length+1 > 0)
   const leadingCavalry = units => braveFaction === 'd' ? null : units.filter(unit => unit.key === 'cav').sort(byLossPriority)[0] ?? null
   function projectedAssault(site,inside) {
     const attacking = present(participants)
     const double = leadingCavalry(attacking)
-    const escalade = coupPossible(site,inside) ? [] : favouredRemoval(attacking,escaladeHits(site,inside),unit=>lossOf(unit,'escalade')*(unit === double ? 2 : 1),double)
+    const escalade = coupPossible(site,inside) ? [] : favouredRemoval(attacking,assaultHits(inside,escaladeBase(site),site.garrison),unit=>lossOf(unit,'escalade')*(unit === double ? 2 : 1),double)
     const storming = attacking.filter(unit=>!escalade.includes(unit))
-    const damage = storming.reduce((total,unit)=>total+strikeOf(unit,'storm'),0)
-    const storm = favouredRemoval(storming,stormHits(site,inside),unit=>lossOf(unit,'storm'))
+    const damage = assaultHits(storming)
+    const storm = favouredRemoval(storming,assaultHits(inside,8,site.garrison),unit=>lossOf(unit,'storm'))
     const allDefenders = site.garrison*8 + inside.reduce((total,unit)=>total+lossOf(unit,'storm'),0)
     return {captures:storming.length > storm.length && damage >= allDefenders,losses:escalade.length+storm.length}
   }
@@ -524,11 +544,14 @@ export function runBattle(state,config,roll,reply = null) {
       const inside = insideOf(site)
       const assailants = present(participants)
       markFought([...assailants,...inside])
+      const stronghold = BY_NAME[name].sites[site.index].name
       const coupLimit = site.coupCapacity-inside.length+1
-      const coup = config.surprise && (automaticCoup || (config.assumeCoup ? coupLimit > 0 : roll(6,'Coup de Main · '+BY_NAME[name].sites[site.index].name) <= coupLimit))
+      const coup = config.surprise && (automaticCoup || (config.assumeCoup ? coupLimit > 0 : roll(6,'Coup de Main · '+stronghold) <= coupLimit))
       if (config.surprise) details.push(`Coup de Main ${coup ? 'succeeds' : 'fails'} (needs ${coupLimit} or less).`)
       if (!coup) {
-        const hits = escaladeHits(site,inside)
+        const base = escaladeBase(site)
+        const hits = assaultHits(inside,base,site.garrison)
+        const strike = config.ignoreTactics ? null : describeAssaultVolley(inside,base,site.garrison,hits)
         const cavalry = leadingCavalry(assailants)
         const autoDouble = hits > 0 && Boolean(cavalry)
         const double = cavalry && hits && choose('Escalade','Have one Cavalry absorb double losses?',[
@@ -537,16 +560,29 @@ export function runBattle(state,config,roll,reply = null) {
         const first = double ? pickUnit('Escalade','Choose the Cavalry that leads the Escalade',assailants.filter(unit => unit.key === 'cav'),cavalry,
           hits >= lossOf(cavalry,'escalade')*2 && humanSide(state,'d') && !config.ignoreTactics) : null
         removeLosses(assailants,hits,'escalade','Escalade',attacking.length > 1,first)
-        details.push(`Escalade at ${BY_NAME[name].sites[site.index].name}: attackers take ${qty(hits/2)}.`)
+        details.push(`Escalade at ${stronghold}: attackers take ${qty(hits/2)}.`)
+        if (strike) {
+          assaults.push({phase:'Escalade',stronghold,attackers:{...strike,removed:assailants.filter(unit => unit.dead).map(labelUnit),double:Boolean(first)}})
+        }
+      } else if (!config.ignoreTactics) {
+        assaults.push({phase:'Escalade',stronghold,skipped:true})
       }
       const alive = present(participants)
       if (!alive.length) break
-      const townHits = stormHits(site,inside)
-      const attackHits = alive.reduce((total,unit) => total+strikeOf(unit,'storm'),0)
+      const townHits = assaultHits(inside,8,site.garrison)
+      const attackHits = assaultHits(alive)
+      const defenseStrike = config.ignoreTactics ? null : describeAssaultVolley(inside,8,site.garrison,townHits)
+      const attackStrike = config.ignoreTactics ? null : describeAssaultVolley(alive,8,0,attackHits)
       const garrisonLost = Math.min(site.garrison,Math.floor(attackHits/8))
       const remaining = site.garrison === garrisonLost ? attackHits-garrisonLost*8 : 0
       removeLosses(alive,townHits,'storm','Storm',attacking.length > 1)
       removeLosses(inside,remaining,'storm','Storm',defending.length > 1)
+      if (defenseStrike) {
+        assaults.push({phase:'Storm',stronghold,
+          attackers:{...defenseStrike,removed:alive.filter(unit => unit.dead).map(labelUnit)},
+          defenders:{...attackStrike,removed:inside.filter(unit => unit.dead).map(labelUnit),garrisonLost},
+        })
+      }
       if (garrisonLost !== site.garrison || present(inside).length || !present(participants).length) {
         details.push(`${PIECES[site.piece]} holds.`)
         break
@@ -614,7 +650,7 @@ export function runBattle(state,config,roll,reply = null) {
   if (removedAtt.length) details.push(`Attacker losses · ${removedAtt.join(', ')}.`)
   if (removedDef.length) details.push(`Defender losses · ${removedDef.join(', ')}.`)
   return {
-    name, attacker, defender, details, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
+    name, attacker, defender, details, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
     prestigeChange:state.tracks.prestige-prestigeBefore, renownChange:(state.tracks[attacker] ?? 0)-renownBefore,
     defenderField:inField(defenders).length, attackerField:inField(participants).length,
     defenderStanding:present(defenders).length, attackerPlunder:present(participants).filter(unit => unit.gold).length,

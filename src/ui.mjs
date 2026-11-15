@@ -30,6 +30,7 @@ let storageProblem = ''
 let storageLocked = false
 let tab = 'play'
 let mapMode = 'map'
+let journalFilters = {}
 let pending = null
 let proposal = null
 let editorReturn = null
@@ -351,11 +352,57 @@ function poolPanel(game) {
   ${Object.entries(POOLS).map(([key,label]) => `<tr><td>${label}</td><td>${game.pools[key]}</td></tr>`).join('')}
   <tr><td>Off-board gold</td><td>${goldAvailable(game)}</td></tr></tbody></table></div>${button('Correct tabletop state','edit-tracks','ghost')}`)
 }
+function journalEntries(game) {
+  const {query = '',card,epoch,faction,space} = journalFilters
+  const factionName = NAMES[faction]
+  const upkeep = {d:'Dux Upkeep',c:'Civitates Upkeep',x:'Saxon Upkeep',s:'Scotti Upkeep'}[faction]
+  const search = query.trim().toLowerCase()
+  const region = BY_NAME[space]
+  const locations = region ? [region.name,...region.sites.map(site => site.name)].map(name => name.toLowerCase()) : []
+  return game.log.filter(entry => {
+    if (card && String(entry.card) !== card || epoch && String(entry.epoch) !== epoch) return false
+    if (factionName && !entry.title.startsWith(factionName+' · ') &&
+        entry.title !== upkeep && entry.title !== factionName+' wins') return false
+    const notes = [entry.title,entry.detail,...entry.dice.map(die => die.label)].join(' ').toLowerCase()
+    if (locations.length && !locations.some(name => notes.includes(name))) return false
+    const searchable = notes+' #'+entry.card+' '+eventTitle(entry.card).toLowerCase()
+    return searchable.includes(search)
+  }).reverse()
+}
+function journalList(entries) {
+  if (!entries.length) return '<p class="muted">No journal entries match these filters.</p>'
+  return `<ul class="journal">${entries.map(entry => `<li><header><strong>${clean(entry.title)}</strong>
+    <small class="muted">${entry.card ? '#'+clean(entry.card)+' · ' : ''}${entry.epoch ? 'Epoch '+clean(entry.epoch) : 'Before Epoch 1'}</small></header>
+    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
+}
 function journal(game) {
-  return panel('Campaign journal',game.log.length
-    ? `<ul class="journal">${[...game.log].reverse().map(e => `<li><header><strong>${clean(e.title)}</strong><small class="muted">${e.card ? '#'+e.card : ''}</small></header>
-        ${e.detail ? `<p class="small">${clean(e.detail)}</p>` : ''}${e.dice.length ? diceList(e.dice,true) : ''}</li>`).join('')}</ul>`
-    : '<p class="muted">Card reveals, actions and Epoch results will appear here.</p>')
+  if (!game.log.length) return panel('Campaign journal','<p class="muted">Card reveals, actions and Epoch results will appear here.</p>')
+  const logged = key => [...new Set(game.log.map(entry => entry[key]).filter(Number.isInteger))].sort((a,b) => a-b)
+  const cards = logged('card')
+  const epochs = logged('epoch')
+  if (journalFilters.card && !cards.includes(Number(journalFilters.card))) delete journalFilters.card
+  if (journalFilters.epoch && !epochs.includes(Number(journalFilters.epoch))) delete journalFilters.epoch
+  const filter = (name,label,options) => field(label,
+    `<select name="${name}">${selectOptions([['','Any'],...options],journalFilters[name] ?? '')}</select>`)
+  const entries = journalEntries(game)
+  return panel('Campaign journal',`<form id="journal-filters" class="stack" aria-label="Journal filters">
+    ${field('Search journal',`<input name="query" type="search" value="${clean(journalFilters.query)}" placeholder="Action, Event, or die roll">`)}
+    <div class="fields">
+      ${filter('card','Card',cards.map(id => [id,'#'+id+' · '+eventTitle(id)]))}
+      ${filter('epoch','Epoch',epochs.map(epoch => [epoch,epoch ? 'Epoch '+epoch : 'Before Epoch 1']))}
+      ${filter('faction','Acting faction',FACTIONS.map(id => [id,NAMES[id]]))}
+      ${filter('space','Space mentioned',REGIONS.map(({name}) => [name,name]).sort((a,b) => a[0].localeCompare(b[0])))}
+    </div>
+    <div class="row">${button('Clear filters','journal-clear','compact ghost')}
+      <span class="small muted" id="journal-count" role="status">${entries.length} of ${game.log.length} entries</span></div>
+    </form><div id="journal-entries">${journalList(entries)}</div>`)
+}
+function updateJournal(form) {
+  journalFilters = Object.fromEntries(new FormData(form))
+  const game = state()
+  const entries = journalEntries(game)
+  document.querySelector('#journal-count').textContent = `${entries.length} of ${game.log.length} entries`
+  document.querySelector('#journal-entries').innerHTML = journalList(entries)
 }
 const commandNotes = {
   Train:'§3.2.1 and errata p.1. Training Troops costs 3 Resources per space. Restoration is separate. An empty Train can accompany a legal Feat.',
@@ -492,7 +539,7 @@ function showPreview(plan,back) {
   const endsGame = plan.after.result && !state().result
   const victory = endsGame ? `<section class="callout warm"><h3>${clean(victoryTitle(plan.after))}</h3>${victoryDetails(plan.after)}</section>`
     : plan.label === 'Victory' ? `<p class="muted">The campaign continues to ${clean(plan.after.epochPhase)}.</p>${victoryTable(plan.after)}` : ''
-  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}${diffList(state(),plan.after,Boolean(victory))}${diceList(plan.dice || [],true)}`,
+  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}${diffList(state(),plan.after,Boolean(victory))}${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
     button('Back','preview-back','ghost',back)+button('Apply result','commit','primary'),'preview')
   pending = { base:state(), after:plan.after, label:plan.label }
 }
@@ -665,6 +712,32 @@ function dynamicFields(descriptor,input) {
     ${ordinary.length ? '<div class="fields">'+ordinary.map(spec => descriptorField(spec,input)).join('')+'</div>' : ''}
     ${advanced.length ? '<details><summary>Choose spaces and pieces</summary><div class="fields">'+advanced.map(spec => descriptorField(spec,input)).join('')+'</div></details>' : ''}`
 }
+function annonaSummary({civitates,paymentError}) {
+  if (paymentError) return `<p class="error">${clean(paymentError)}</p>`
+  return civitates ? `<p>Civitates payment · ${civitates.blue} Briton Resources and ${civitates.wealth} Wealth</p>` : ''
+}
+function annonaFields(descriptor,input) {
+  const {help,fields,annona} = descriptor
+  Object.assign(input,annona.adjustments)
+  const consent = fields.find(spec => spec.name === 'blueConsent')
+  const paymentFields = fields.filter(spec => spec !== consent)
+  const paid = annona.paidByDux.length ? `<div class="callout small"><strong>Dux covers these groups first</strong>
+    <ul class="guide-list">${annona.paidByDux.map(payment =>
+      `<li>${clean(payment.label)} · ${payment.amount} paid by Dux</li>`).join('')}</ul></div>` : ''
+  return `<p class="muted">${clean(help)}</p>${consent ? descriptorField(consent,input) : ''}${paid}
+    ${paymentFields.length ? '<div class="fields">'+paymentFields.map(spec => descriptorField(spec,input)).join('')+'</div>' : ''}
+    <div data-annona-summary aria-live="polite">${annonaSummary(annona)}</div>`
+}
+function updateAnnonaSummary(form) {
+  const summary = form.querySelector('[data-annona-summary]')
+  if (!summary) return
+  const input = session.work.input
+  const game = {...state(),rng:input.guide?.rng ?? state().rng}
+  const {annona} = annonaChoices(game,input,form.id === 'action-form' ? 'x' : null)
+  const wealth = form.elements['annona-wealth-spend']
+  if (wealth?.validity.rangeOverflow) annona.paymentError = 'Enter at most '+wealth.max+' Wealth for these payments.'
+  summary.innerHTML = annonaSummary(annona)
+}
 function commandSpec(game,faction,command,feat,option,input) {
   const options = { ...commandOptions(option,feat), tradeAll:defaultFlag(input.tradeAll) }
   return commandFields(game,faction,command,feat,options) ?? militaryFields(game,faction,command,feat,options,input)
@@ -716,7 +789,8 @@ function actionSelections(game,faction,input) {
   const feat = featOption(option) && feats.includes(input.feat) ? input.feat : ''
   const sides = eventSides(game.current)
   const side = playerEvent?.side ?? (sides.includes(input.side) ? input.side : (faction === 'x' || faction === 's') && sides.includes('shaded') ? 'shaded' : sides[0])
-  const event = option === 'event' ? eventChoices(game,game.current,faction,side,input) : null
+  const eventState = game.current === 10 && input.guide?.rng ? {...game,rng:input.guide.rng} : game
+  const event = option === 'event' ? eventChoices(eventState,game.current,faction,side,input) : null
   const grant = option === 'event' ? grantOperation(game,game.current,faction,side,input,playerEvent ?? {}) : null
   const spec = option !== 'event' && option !== 'pass' && (!featOption(option) || feat) ? commandSpec(game,faction,command,feat,option,input) : null
   return { option,command,feat,feats,side,sides,event,grant,spec }
@@ -734,7 +808,7 @@ function targetMap(name) {
   ensure(targets.size,'No spaces are available for this target.')
   modal(clean(spec.label),renderMap(workBoard(),targets),button('Back to action','action-back','ghost'),'target-map',{name,targets})
 }
-function actionDialog(choice = null, guidance = null) {
+function actionDialog(choice = null, guidance = null, battles = []) {
   const game = state()
   const faction = activeFaction(game)
   const options = actionOptions(game)
@@ -779,11 +853,12 @@ function actionDialog(choice = null, guidance = null) {
     ${field('Journal note · optional',`<textarea name="note" maxlength="500" placeholder="Command, targets or printed ruling">${clean(input.note)}</textarea>`)}
     <label class="check"><input type="checkbox" name="confirmed" value="yes" ${input.confirmed === 'yes' ? 'checked' : ''} required> I resolved the tabletop changes.</label>`
     : grant ? grantMarkup(grant,input,game)
+    : event?.annona ? annonaFields(event,input)
     : event ? dynamicFields(event,input)
     : spec ? operationMarkup(spec,input,command,feat)
     : option === 'pass' ? '<p>Record the Pass, adjust income, and move to the next eligible faction.</p>' : ''
   const note = option === 'event' ? eventNotes[game.current+'/'+side] : commandNotes[command]
-  modal(NAMES[faction]+' · '+ACTIONS[option],`${help}<form id="action-form" class="stack">
+  modal(NAMES[faction]+' · '+ACTIONS[option],`${help}${battleCalculations(battles)}<form id="action-form" class="stack">
     ${optionMarkup}${resolution}${method}${applied}${note ? ruleNotes([note]) : ''}<button type="submit" class="btn primary">Preview result ${icon('arrow')}</button></form>`,
     button('Discard draft','discard','ghost'),'action')
   save()
@@ -867,6 +942,32 @@ function battlePosition(context) {
     ${context.modifiers.length ? `<p class="small muted">${context.modifiers.map(clean).join(' · ')}</p>` : ''}
     </details>`
 }
+function battleCalculations(battles = []) {
+  if (!battles.length) return ''
+  const volley = (heading,strike) => {
+    const {garrison,garrisonStrike,units,hits,removed,garrisonLost,double} = strike
+    const lines = units.map(({key,count,base,bonus,loss,modifiers}) => {
+      const context = modifiers.length ? ` (${clean(modifiers.join(', '))})` : ''
+      const amount = modifiers.length ? `${base}${bonus ? ' + '+bonus : ''} → ${loss}` : String(loss)
+      return `<li>${count} × ${clean(groupLabel(key))} · ${amount} each${context}</li>`
+    })
+    if (garrison) lines.unshift(`<li>Garrison · ${garrison} × ${garrisonStrike} = ${garrison*garrisonStrike}</li>`)
+    const counts = new Map()
+    for (const label of removed) counts.set(label,(counts.get(label) ?? 0)+1)
+    const losses = [...counts].map(([label,count]) => count+' × '+label)
+    if (garrisonLost) losses.unshift(garrisonLost+' Garrison')
+    return `<div><strong>${heading} · ${hits} loss strength</strong>
+      ${lines.length ? '<ul class="guide-list">'+lines.join('')+'</ul>' : ''}
+      ${double ? '<p>Cavalry absorbs double losses first.</p>' : ''}
+      <p>Removed · ${clean(losses.join(', ') || 'None')}</p></div>`
+  }
+  return `<details class="details battle-calculations"><summary>Battle calculations</summary>
+    ${battles.map(({name,assaults}) => `<h3>${clean(name)}</h3>${assaults.map(step => `<div class="callout small">
+      <strong>${step.phase} · ${clean(step.stronghold)}</strong>
+      ${step.skipped ? '<p>Coup de Main skips Escalade.</p>' : `<div class="assault-volleys">
+        ${volley('Losses to attackers',step.attackers)}${step.defenders ? volley('Losses to defenders',step.defenders) : ''}</div>`}
+      </div>`).join('')}`).join('')}</details>`
+}
 function resumeBattle() {
   const record = session.work?.input.battle
   ensure(record,'Start a Battle to make tactical choices.')
@@ -879,14 +980,14 @@ function resumeBattle() {
       session.work.input.recordedDice = result.dice
       delete session.work.input.battle
       save()
-      actionDialog()
+      actionDialog(null,null,result.battles)
       return
     }
     if (job.kind === 'sample') {
-      modal(job.label,`<p class="muted">${clean(result.detail)}</p>${diffList(job.origin,result.after)}${diceList(result.dice,true)}`,
+      modal(clean(job.label),`<p class="muted">${clean(result.detail)}</p>${diffList(job.origin,result.after)}${battleCalculations(result.battles)}${diceList(result.dice,true)}`,
         button('Close sample','discard','primary'),'sample-result')
     } else {
-      showPreview({label:job.label,description:result.detail || job.description,after:result.after,dice:result.dice,decision:job.decision},'battle')
+      showPreview({label:job.label,description:result.detail || job.description,after:result.after,dice:result.dice,battles:result.battles,decision:job.decision},'battle')
     }
     return
   }
@@ -944,6 +1045,22 @@ function bot(choices = {}) {
     actionDialog(null,{ ...proposal, dice:proposal.dice, faction })
   }
 }
+function prepareAction(run,choices) {
+  try { run() }
+  catch (error) {
+    const game = state()
+    const faction = activeFaction(game)
+    const diagnostic = {message:error.message,version:VERSION,card:game.current,epoch:game.epoch,rng:game.rng,faction,choices}
+    const hasDraft = session.work?.kind === 'action' && !session.work.input.battle && faction
+    const back = hasDraft ? button('Return to draft','action-back','ghost') : button('Back to turn','close','ghost')
+    modal(faction ? NAMES[faction]+' preview stopped' : 'Action preview stopped',
+      `<p class="error" role="alert">${clean(error.message)}</p>
+      <p class="muted">You can retry, review the position, or export this save with the error details.</p>
+      <p class="small muted">v${VERSION} · ${game.current ? 'Card #'+game.current : 'Before opening cards'} · RNG ${game.rng}</p>`,
+      back+button('Export diagnostic save','export-diagnostic')+button('Retry','retry-action','primary'),
+      'action-error',{run,choices,diagnostic})
+  }
+}
 function clickTurn(action,value) {
   const game = state()
   if (game.markers[55]?.side === 'unshaded' && !SEAS[game.markers[55].sea]) {
@@ -981,7 +1098,7 @@ function epochDialog() {
   let form = ''
   if (phase === 'Annona') {
     form = game.markers[10]?.side === 'unshaded' ? '<p>The active Annona Event skips this phase.</p>' :
-      dynamicFields(annonaChoices(game,input),input)
+      annonaFields(annonaChoices(game,input),input)
   } else if (phase === 'Imperium') {
     form = isHumanFaction(game,'c')
       ? `<p>Move up to ${maxHoard(game)} Briton Resources to Wealth. The app checks Imperium and Dominance in rule order.</p>${number('Resources to hoard','hoard',input.hoard ?? 0,0,maxHoard(game),'required')}`
@@ -1025,6 +1142,7 @@ function epochPreview() {
     }
     advanceEpoch(after,info,replacement)
   },dice)
+  if (phase === 'Annona' && plan.after.log.at(-1)?.detail) plan.description = plan.after.log.at(-1).detail
   showPreview(plan,'epoch')
 }
 function editorBack() {
@@ -1125,8 +1243,7 @@ async function completeImport(file) {
 function resumeEditor() {
   const work = session.work
   if (work?.input.battle) {
-    try { resumeBattle() }
-    catch (error) { message('This draft needs to be discarded. '+error.message) }
+    prepareAction(resumeBattle)
   } else if (work?.input.editor && work.draft) {
     const editor = work.input.editor
     openEditor(editor === 'tracks' ? 'tracks' : 'region',editor,work.kind)
@@ -1151,6 +1268,7 @@ function reloadStorage(nextSession) {
   session = nextSession
   proposal = null
   editorReturn = null
+  journalFilters = {}
   dismiss()
   tab = 'play'
   save()
@@ -1168,6 +1286,13 @@ function showError(error) {
 function handleAction(action,value) {
   switch (action) {
     case 'tab': tab = value; render(); return
+    case 'journal-clear': {
+      const form = document.querySelector('#journal-filters')
+      for (const field of form.querySelectorAll('[name]')) field.value = ''
+      updateJournal(form)
+      form.elements.query.focus()
+      return
+    }
     case 'row-add':
     case 'row-remove': {
       const input = session.work.input
@@ -1192,7 +1317,7 @@ function handleAction(action,value) {
     case 'event-battle': eventBattleDialog(); return
     case 'battle-back': session.work.input.battle.answers.pop(); save(); resumeBattle(); return
     case 'battle-demo': openBattleDemo(); return
-    case 'resume-battle': resumeBattle(); return
+    case 'resume-battle': prepareAction(resumeBattle); return
     case 'card-detail': cardDetails(Number(value)); return
     case 'repair-raid-sea': {
       const plan = preview(state(),'Niall’s Raid · '+SEAS[value],'Record the Sea already chosen for the active Event.',after => {
@@ -1242,9 +1367,26 @@ function handleAction(action,value) {
       commit(shown.after,shown.label)
       return
     }
-    case 'choose':
-    case 'bot': clickTurn(action,value); return
-    case 'bot-consent': bot({blueConsent:value === 'yes'}); return
+    case 'choose': clickTurn(action,value); return
+    case 'bot': prepareAction(() => clickTurn('bot')); return
+    case 'bot-consent': {
+      const choices = {blueConsent:value === 'yes'}
+      prepareAction(() => bot(choices),choices)
+      return
+    }
+    case 'retry-action': {
+      ensure(dialogView === 'action-error','Open the error details to retry.')
+      prepareAction(dialogData.run,dialogData.choices)
+      return
+    }
+    case 'export-diagnostic': {
+      ensure(dialogView === 'action-error','Open the error details before exporting.')
+      const data = JSON.parse(serialize(session))
+      data.diagnostic = dialogData.diagnostic
+      download(`Pendragon_Diagnostic_v${VERSION}_Card-${state().current ?? 'Setup'}.json`,JSON.stringify(data),'application/json')
+      message('Exported diagnostic save.')
+      return
+    }
     case 'epoch': epochDialog(); return
     case 'preview-back': previewBack(value); return
     case 'discard': session.work = null; pending = null; proposal = null; save(); dismiss(); render(); message('Draft discarded.'); return
@@ -1313,11 +1455,9 @@ document.addEventListener('change',async event => {
       const advanced = target.closest('details')?.open
       const key = target.name
       epochDialog()
-      if (advanced) {
-        const refocused = dialog.querySelector('[name="'+CSS.escape(key)+'"]')
-        if (refocused?.closest('details')) refocused.closest('details').open = true
-        refocused?.focus({preventScroll:true})
-      }
+      const refocused = dialog.querySelector('[name="'+CSS.escape(key)+'"]')
+      if (advanced && refocused?.closest('details')) refocused.closest('details').open = true
+      refocused?.focus({preventScroll:true})
     }
     if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !target.name.startsWith('eligible') && !/^(rows|feats)\d+-/.test(target.name)))) {
       if (['option','command','feat','side','grant','grantFeat'].includes(target.name)) {
@@ -1342,8 +1482,10 @@ document.addEventListener('input',event => {
   const form = target.form
   if (!form || !target.name) return
   try {
+    if (form.id === 'journal-filters') { updateJournal(form); return }
     const descriptor = { 'cards-form':'cards', 'action-form':'action', 'epoch-form':'epoch', 'event-battle-form':'action' }[form.id]
     if (descriptor) changeWork(descriptor,target.name,target.type === 'checkbox' && !target.checked ? '' : target.value)
+    if (['annona-blue-spend','annona-wealth-spend'].includes(target.name)) updateAnnonaSummary(form)
     if (['edit-region-form','edit-tracks-form'].includes(form.id)) bindEditorDraft(form,false)
   } catch (error) { showError(error) }
 })

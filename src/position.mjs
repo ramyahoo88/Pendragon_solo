@@ -7,6 +7,20 @@ export const own = (obj, key) => Object.hasOwn(obj, key)
 export const inRange = (n, min, max) => Number.isInteger(n) && n >= min && n <= max
 export const clamp = (n, min = 0, max = 80) => Math.max(min, Math.min(n, max))
 export const ensure = (condition, message) => { if (!condition) throw new Error(message) }
+export function makeRoller(state, history, scripted = []) {
+  let index = 0
+  return (sides, label) => {
+    let n = state.rng
+    n ^= n << 13
+    n ^= n >>> 17
+    n ^= n << 5
+    state.rng = n >>> 0
+    const value = scripted[index++] ?? (1 + Math.floor(state.rng / 0x100000000 * sides))
+    ensure(inRange(value,1,sides),`Invalid D${sides} result for ${label}.`)
+    history.push({sides,value,label})
+    return value
+  }
+}
 export const isRoman = state => state.imperium[0] === 'r'
 export const isFragmentation = state => state.imperium === 'f'
 export const preemption = state => isRoman(state) || state.imperium === 'am'

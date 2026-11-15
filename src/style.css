@@ -153,6 +153,11 @@ legend{padding:0 5px;color:var(--muted);font-size:12px;font-weight:650}
 .battle-position li+li{margin-top:4px}
 .battle-position li small{display:block;color:var(--muted)}
 .battle-sites{display:flex;flex-wrap:wrap;gap:4px 14px}
+.battle-calculations h3{margin:12px 0 6px}
+.battle-calculations .callout+.callout{margin-top:8px}
+.assault-volleys{display:grid;gap:10px;margin-top:6px}
+.assault-volleys ul{margin:4px 0}
+[data-annona-summary]:empty{display:none}
 .battle-sites li+li{margin-top:0}
 .guide-list{padding-left:18px;margin:0;color:var(--muted)}
 .guide-list li+li{margin-top:5px}

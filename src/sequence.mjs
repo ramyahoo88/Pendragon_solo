@@ -1,7 +1,7 @@
 import { EPOCHS, EPOCH_PHASES, FACTIONS, NAMES, PIVOTAL, REGIONS } from './data.mjs'
 import { card } from './cards.mjs'
 import { makeScenarioDeck, scenarioDeckSize, scenarioInfo, validateRevealedDeck } from './scenarios.mjs'
-import { addProsperity, boardTotals, changeTrack, clone, control, countStrongholds, ensure, goldAvailable, groupLabel, humanFactions, inRange, isHumanFaction, isFragmentation, isRoman, loaded, on, own, plunderTo, scores, setImperium, spendCivitates, spendDux, duxFunds, sum, validatePosition } from './position.mjs'
+import { addProsperity, boardTotals, changeTrack, clone, control, countStrongholds, ensure, goldAvailable, groupLabel, humanFactions, inRange, isHumanFaction, isFragmentation, isRoman, loaded, makeRoller, on, own, plunderTo, scores, setImperium, spendCivitates, spendDux, duxFunds, sum, validatePosition } from './position.mjs'
 
 export const ACTIONS = {
   pass: 'Pass', command: 'Command only', feat: 'Command + Feat', limited: 'Limited Command', limitedFeat: 'Limited Command + Feat', event: 'Event',
@@ -209,7 +209,7 @@ function annonaAccount(state,options) {
       const funds = payer === 'd' ? duxFunds(account,consent,blueLimit) : account.tracks.blue+account.tracks.wealth
       return cost <= funds && cost <= gold
     },
-    charge(payer,cost) {
+    charge(payer,cost,wealthLimit = Infinity) {
       ensure(gold >= cost,'There are too few off-board gold cubes to pay these Warbands.')
       if (payer === 'd') {
         const before = account.tracks.blue
@@ -217,10 +217,11 @@ function annonaAccount(state,options) {
         blueLimit -= before-account.tracks.blue
       } else if (wealthSpend === null) spendCivitates(account,cost)
       else {
-        ensure(wealthSpend <= cost,'Wealth to spend cannot exceed the Civitates Annona payment.')
-        ensure(cost-wealthSpend <= account.tracks.blue,'Civitates cannot pay the chosen balance from Briton Resources after Dux pays.')
-        account.tracks.wealth -= wealthSpend
-        account.tracks.blue -= cost-wealthSpend
+        const exact = Math.min(wealthSpend,wealthLimit)
+        ensure(exact <= cost,'Wealth to spend cannot exceed the Civitates Annona payment.')
+        ensure(cost-exact <= account.tracks.blue,'Civitates cannot pay the chosen balance from Briton Resources after Dux pays.')
+        account.tracks.wealth -= exact
+        account.tracks.blue -= cost-exact
       }
       gold -= cost
     },
@@ -283,35 +284,54 @@ export function resolveAnnona(state, paid, options = {}) {
   if (releasedGroups) notes.push(`${releasedGroups} unpaid Foederati ${releasedGroups === 1 ? 'group revolts' : 'groups revolt'}.`)
   return notes.join(' ') || 'All Foederati Warbands already carry their payment.'
 }
-export function annonaPolicy(state,humanPicks,options = {},roll) {
+function botAnnonaPayments(groups,payer,covered,account,roll) {
+  const candidates = groups.filter(group => group.employer === payer && (covered.get(group.id) ?? 0) < group.due)
+    .map(group => ({id:group.id,amount:group.due-(covered.get(group.id) ?? 0),tie:roll ? roll(6,'Annona · '+group.name) : 0}))
+    .sort((a,b) => a.amount-b.amount || a.tie-b.tie)
+  const paid = []
+  for (const {id,amount} of candidates) {
+    if (!account.canPay(payer,amount)) continue
+    account.charge(payer,amount)
+    paid.push({id,payer,amount})
+  }
+  return paid
+}
+function planAnnonaPayments(state,humanPicks,options,roll) {
   const groups = nationGroups(state,options.nation).filter(group => group.due)
   const humans = annonaPayers.filter(payer => isHumanFaction(state,payer))
   const picks = humanPicks.map(payment => annonaPayment(groups,payment,humans.length === 1 ? humans[0] : undefined))
   const account = annonaAccount(state,options)
   const paid = []
   const covered = new Map()
+  let wealthSpend = options.wealthSpend
+  let civitates = null
   const recordPayment = payment => {
     paid.push(payment)
     covered.set(payment.id,(covered.get(payment.id) ?? 0)+payment.amount)
   }
   for (const payer of annonaPayers) {
-    if (humans.includes(payer)) {
-      const selected = picks.filter(payment => payment.payer === payer)
-      account.charge(payer,sum(selected.map(payment => payment.amount)))
-      selected.forEach(recordPayment)
+    if (!humans.includes(payer)) {
+      botAnnonaPayments(groups,payer,covered,account,roll).forEach(recordPayment)
       continue
     }
-    const candidates = groups.filter(group => group.employer === payer && (covered.get(group.id) ?? 0) < group.due)
-      .map(group => ({id:group.id,amount:group.due-(covered.get(group.id) ?? 0),tie:roll ? roll(6,'Annona · '+group.name) : 0}))
-      .sort((a,b) => a.amount-b.amount || a.tie-b.tie)
-    for (const group of candidates) {
-      if (account.canPay(payer,group.amount)) {
-        account.charge(payer,group.amount)
-        recordPayment({id:group.id,payer,amount:group.amount})
-      }
+    const selected = picks.filter(payment => payment.payer === payer)
+    // An older draft may still select a group that the preceding bot Dux payment covered.
+    const remaining = payer === 'c' && !humans.includes('d')
+      ? selected.filter(payment => !covered.has(payment.id)) : selected
+    const cost = sum(remaining.map(payment => payment.amount))
+    const wealthLimit = remaining.length < selected.length ? cost : Infinity
+    const {blue,wealth} = account.tracks
+    account.charge(payer,cost,wealthLimit)
+    if (payer === 'c') {
+      civitates = {blue:blue-account.tracks.blue,wealth:wealth-account.tracks.wealth}
+      if (wealthSpend != null && wealthSpend !== '' && wealthLimit < Infinity) wealthSpend = Math.min(Number(wealthSpend),wealthLimit)
     }
+    remaining.forEach(recordPayment)
   }
-  return paid
+  return {paid,wealthSpend,civitates}
+}
+export function annonaPolicy(state,humanPicks,options = {},roll) {
+  return planAnnonaPayments(state,humanPicks,options,roll).paid
 }
 const annonaPayerKey = group => 'annona-payer-'+group.id
 function annonaPayerChoice(group,input) {
@@ -319,34 +339,13 @@ function annonaPayerChoice(group,input) {
   if (annonaMarked(input['annona-'+group.id]) || annonaMarked(input['pay-'+group.id])) return group.employer
   return ''
 }
-export function annonaChoices(state,input = {},nation = null) {
-  const groups = nationGroups(state,nation).filter(group => group.due)
-  const humans = annonaPayers.filter(payer => isHumanFaction(state,payer))
-  const fields = groups.flatMap(group => {
-    if (!humans.length) return []
-    const options = [['','No player payment'],...humans.map(payer => [payer,NAMES[payer]+' pays '+group.due])]
-    if (humans.length === 2) {
-      for (let d = 1; d < group.due; d++) options.push(['split-'+d,`Dux pays ${d}, Civitates pays ${group.due-d}`])
-    }
-    return [{name:annonaPayerKey(group),label:group.name+' · '+groupLabel(group.key),type:'select',options,defaultValue:annonaPayerChoice(group,input)}]
-  })
-  if (groups.length && humans.includes('d') && !isFragmentation(state)) {
-    fields.push({name:'annona-blue-spend',label:'Maximum blue Resources for Dux (blank = blue first)',type:'number',min:0,max:80,defaultValue:''})
-  }
-  if (groups.length && humans.includes('c') && state.tracks.wealth > 0) {
-    fields.push({name:'annona-wealth-spend',label:'Wealth to use as Resources (blank = blue first)',type:'number',min:0,max:state.tracks.wealth,defaultValue:''})
-  }
-  if (state.imperium === 'ac' && state.tracks.blue > 0 && humans.includes('c') && (humans.includes('d') ? groups.length : groups.some(group => group.employer === 'd'))) {
-    fields.push({name:'blueConsent',label:'Civitates permits Dux to use blue Resources',type:'checkbox',defaultValue:false})
-  }
-  const scope = nation === 'x' ? 'Only Saxon Foederati resolve Annona now. ' : ''
-  const help = groups.length ? scope+'Dux pays first, then Civitates. A player can cover either color. Non-players pay their own groups.' :
-    scope+'No Foederati Warbands require payment.'
-  return {help,fields}
+function annonaOptions(state,input,nation,humans) {
+  const blueConsent = humans.includes('c') ? annonaMarked(input.blueConsent) : scores(state).d.margin < scores(state).c.margin
+  return {nation,blueConsent,blueSpend:humans.includes('d') ? input['annona-blue-spend'] : undefined,
+    wealthSpend:humans.includes('c') ? input['annona-wealth-spend'] : undefined}
 }
-export function planAnnona(state,input,roll,nation = null) {
-  const humans = annonaPayers.filter(payer => isHumanFaction(state,payer))
-  const picks = nationGroups(state,nation).filter(group => group.due).flatMap(group => {
+function annonaSelections(groups,input,humans) {
+  return groups.flatMap(group => {
     const value = annonaPayerChoice(group,input)
     if (humans.includes(value)) return [{id:group.id,payer:value,amount:group.due}]
     if (humans.length === 2 && typeof value === 'string' && value.startsWith('split-')) {
@@ -356,10 +355,67 @@ export function planAnnona(state,input,roll,nation = null) {
     }
     return []
   })
-  const blueConsent = humans.includes('c') ? annonaMarked(input.blueConsent) : scores(state).d.margin < scores(state).c.margin
-  const options = {nation,blueConsent,blueSpend:humans.includes('d') ? input['annona-blue-spend'] : undefined,
-    wealthSpend:humans.includes('c') ? input['annona-wealth-spend'] : undefined}
-  return {...options,paid:annonaPolicy(state,picks,options,roll)}
+}
+export function annonaChoices(state,input = {},nation = null) {
+  const groups = nationGroups(state,nation).filter(group => group.due)
+  const humans = annonaPayers.filter(payer => isHumanFaction(state,payer))
+  const options = annonaOptions(state,input,nation,humans)
+  // Quote the first payment using the same die stream as the action replay.
+  const roller = () => makeRoller({rng:state.rng},[])
+  const duxPayments = humans.length === 1 && humans[0] === 'c'
+    ? botAnnonaPayments(groups,'d',new Map(),annonaAccount(state,{blueConsent:options.blueConsent}),roller()) : []
+  const paidByDux = duxPayments.map(payment => {
+    const group = groups.find(group => group.id === payment.id)
+    return {...payment,label:group.name+' · '+groupLabel(group.key)}
+  })
+  const covered = new Set(duxPayments.map(payment => payment.id))
+  const payable = groups.filter(group => !covered.has(group.id))
+  const adjustments = {}
+  for (const group of groups) {
+    if (covered.has(group.id) && annonaPayerChoice(group,input)) adjustments[annonaPayerKey(group)] = ''
+  }
+  let civitates = null
+  let paymentError = ''
+  let maxWealth = 0
+  if (humans.includes('c')) {
+    try {
+      const picks = annonaSelections(payable,input,humans)
+      maxWealth = Math.min(state.tracks.wealth,sum(picks.filter(payment => payment.payer === 'c').map(payment => payment.amount)))
+      const entered = Number(options.wealthSpend)
+      if (Number.isInteger(entered) && entered > maxWealth) {
+        adjustments['annona-wealth-spend'] = maxWealth ? String(maxWealth) : ''
+      }
+      const funding = {...options,wealthSpend:adjustments['annona-wealth-spend'] ?? options.wealthSpend}
+      civitates = planAnnonaPayments(state,picks,funding,roller()).civitates
+    } catch (error) { paymentError = error.message }
+  }
+  const fields = payable.flatMap(group => {
+    if (!humans.length) return []
+    const options = [['','No player payment'],...humans.map(payer => [payer,NAMES[payer]+' pays '+group.due])]
+    if (humans.length === 2) {
+      for (let d = 1; d < group.due; d++) options.push(['split-'+d,`Dux pays ${d}, Civitates pays ${group.due-d}`])
+    }
+    return [{name:annonaPayerKey(group),label:group.name+' · '+groupLabel(group.key),type:'select',options,defaultValue:annonaPayerChoice(group,input),refresh:true}]
+  })
+  if (groups.length && humans.includes('d') && !isFragmentation(state)) {
+    fields.push({name:'annona-blue-spend',label:'Maximum blue Resources for Dux (blank = blue first)',type:'number',min:0,max:80,defaultValue:''})
+  }
+  if (payable.length && humans.includes('c') && state.tracks.wealth > 0) {
+    fields.push({name:'annona-wealth-spend',label:'Wealth to use as Resources (blank = blue first)',type:'number',min:0,max:maxWealth,defaultValue:''})
+  }
+  if (state.imperium === 'ac' && state.tracks.blue > 0 && humans.includes('c') && (humans.includes('d') ? groups.length : groups.some(group => group.employer === 'd'))) {
+    fields.unshift({name:'blueConsent',label:'Civitates permits Dux to use blue Resources',type:'checkbox',defaultValue:false,refresh:true})
+  }
+  const scope = nation === 'x' ? 'Only Saxon Foederati resolve Annona now. ' : ''
+  const help = groups.length ? scope+'Dux pays first, then Civitates. A player can cover either color. Non-players pay their own groups.' :
+    scope+'No Foederati Warbands require payment.'
+  return {help,fields,annona:{paidByDux,civitates,paymentError,adjustments}}
+}
+export function planAnnona(state,input,roll,nation = null) {
+  const humans = annonaPayers.filter(payer => isHumanFaction(state,payer))
+  const picks = annonaSelections(nationGroups(state,nation).filter(group => group.due),input,humans)
+  const options = annonaOptions(state,input,nation,humans)
+  return {...options,...planAnnonaPayments(state,picks,options,roll)}
 }
 export function maxHoard(state) {
   const stronghold = state.markers[76] ? 'hill' : 'town'

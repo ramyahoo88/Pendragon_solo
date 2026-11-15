@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { replayAction } from '../src/action-resolution.mjs'
 import { battleEnemies } from '../src/battle.mjs'
 import { botPivotalChoice, makeRoller, proposeBot } from '../src/bots.mjs'
@@ -7,6 +10,7 @@ import { applyStilichoRecovery } from '../src/events.mjs'
 import { raidPaths } from '../src/operations.mjs'
 import { availability, friendlyControl, isHumanFaction, loaded, on, opening, scores } from '../src/position.mjs'
 import { SCENARIOS } from '../src/scenarios.mjs'
+import { fresh, serialize } from '../src/session.mjs'
 import {
   actionOptions, activeFaction, advanceCard, advanceEpoch, annonaPolicy, canUseOmens, declarePivotal,
   finishAction, inCardOrder, maxHoard, resolveOmens, settleEntropy, startDigitalDeck, upcomingDigitalCard, validateSave,
@@ -14,13 +18,24 @@ import {
 
 const regions = REGIONS.map(({name}) => name)
 const add = (object,key) => { object[key] = (object[key] ?? 0)+1 }
+let failureDirectory
+
+function failureSave(game,seed) {
+  failureDirectory ??= mkdtempSync(join(tmpdir(),'pendragon-sweep-'))
+  const path = join(failureDirectory,`${seed}-${game.scenario.replaceAll(' ','_')}-${game.humans.join('')}-${game.difficulty}.json`)
+  writeFileSync(path,serialize(fresh(game)))
+  return path
+}
 
 function replay(game,job,counts) {
   const answers = []
   for (let step=0;step<500;step++) {
     const result = replayAction(game,job,answers)
     if (!result.prompt) return result.after
-    answers.push(result.prompt.defaultValue)
+    const {prompt} = result
+    const answer = tactics === 'first' ? prompt.options[0].value :
+      tactics === 'last' ? prompt.options.at(-1).value : prompt.defaultValue
+    answers.push(answer)
     counts.tacticalChoices++
   }
   throw new Error('Tactical prompt limit reached.')
@@ -90,6 +105,7 @@ function run(settings,seed,active,counts) {
   let game = opening(seed,{...settings,deckMode:'digital'})
   startDigitalDeck(game)
   for (let step=0;step<450 && !game.result;step++) {
+    const before = game
     try {
       const phase = game.epochPhase
       if (game.entropy) settleEntropy(game,game.entropy[0])
@@ -134,36 +150,47 @@ function run(settings,seed,active,counts) {
         }
       }
     } catch (error) {
-      throw new Error('Card '+game.current+', Epoch '+game.epoch+', phase '+game.epochPhase+
-        ', acting faction '+activeFaction(game),{cause:error})
+      // Planner and tactical replays work on copies. A failed proposal leaves this position intact.
+      const failure = new Error('Card '+before.current+', Epoch '+before.epoch+', phase '+before.epochPhase+
+        ', acting faction '+activeFaction(before),{cause:error})
+      failure.save = failureSave(before,seed)
+      throw failure
     }
     validateSave(game)
   }
   if (!game.result) throw new Error('Campaign did not reach scoring.')
 }
 
-function sweep(active,freshSeeds) {
+function sweep(active) {
   const counts = {completed:0,botModes:{},botEvents:{},playerCommands:{},pivotals:0,tacticalChoices:0,failures:[]}
   for (const [scenarioIndex,scenario] of Object.keys(SCENARIOS).entries()) for (const [seatIndex,seat] of Object.keys(SOLO_SEATS).entries()) {
     for (const [i,difficulty] of DIFFICULTIES.entries()) {
       const variant = i%2 === 1
-      const seed = freshSeeds ? (active ? 602000 : 601000)+scenarioIndex*101+seatIndex*13+i :
+      const seed = seedBlock ? seedBlock+(active ? 1000 : 0)+scenarioIndex*100+seatIndex*10+i :
+        freshSeeds ? (active ? 602000 : 601000)+scenarioIndex*101+seatIndex*13+i :
         active ? 37171+i*89 : 97+i*17
       try {
         run({scenario,seat,difficulty,variant},seed,active,counts)
         counts.completed++
       } catch (error) {
-        counts.failures.push({scenario,seat,difficulty,variant,seed,position:error.message,cause:error.cause?.message})
+        counts.failures.push({scenario,seat,difficulty,variant,seed,position:error.message,cause:error.cause?.message,save:error.save})
       }
     }
   }
-  console.log(JSON.stringify({policy:active ? 'active' : 'pass',seeds:freshSeeds ? 'fresh' : 'baseline',...counts}))
+  console.log(JSON.stringify({policy:active ? 'active' : 'pass',seeds:seedBlock || (freshSeeds ? 'fresh' : 'baseline'),tactics,...counts}))
   if (counts.failures.length) process.exitCode = 1
 }
 
 const args = process.argv.slice(2)
 const freshSeeds = args.includes('--fresh')
-const selection = args.filter(arg => arg !== '--fresh')
-if (selection.some(value=>!['active','pass'].includes(value))) throw new Error('Use active, pass, or omit the policy to run both. Add --fresh for the distinct audit seeds.')
-if (!selection.length || selection.includes('pass')) sweep(false,freshSeeds)
-if (!selection.length || selection.includes('active')) sweep(true,freshSeeds)
+const seedArg = args.find(arg => arg.startsWith('--seed-block='))
+const seedBlock = seedArg ? Number(seedArg.split('=')[1]) : null
+const tacticsArg = args.find(arg => arg.startsWith('--tactics='))
+const tactics = tacticsArg ? tacticsArg.split('=')[1] : 'default'
+const selection = args.filter(arg => !['--fresh',seedArg,tacticsArg].includes(arg))
+if (selection.some(value => !['active','pass'].includes(value)) || !['default','first','last'].includes(tactics) ||
+    seedArg && (freshSeeds || !Number.isInteger(seedBlock) || seedBlock < 1 || seedBlock > 0xffffffff-2000)) {
+  throw new Error('Use active, pass, or omit the policy to run both. Choose --fresh or --seed-block=N, and optionally --tactics=first or --tactics=last.')
+}
+if (!selection.length || selection.includes('pass')) sweep(false)
+if (!selection.length || selection.includes('active')) sweep(true)

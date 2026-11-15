@@ -7,23 +7,10 @@ import { hasEventEffect, selectBotEventInput } from './event-policy.mjs'
 import { grantRule, setGrantMarkers } from './grants.mjs'
 import { runCommand, runCommandFeat } from './commands.mjs'
 import { botForcesRaidBattle, raidBonusPlunder, raidResponders } from './operations.mjs'
-import { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } from './position.mjs'
+import { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, makeRoller as positionRoller, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } from './position.mjs'
 import { actionOptions, activeFaction, finishAction, isPivotalCard, pivotalOptions, resolveImperium } from './sequence.mjs'
 
-export function makeRoller(state, history, scripted = []) {
-  let index = 0
-  return (sides, label) => {
-    let n = state.rng
-    n ^= n << 13
-    n ^= n >>> 17
-    n ^= n << 5
-    state.rng = n >>> 0
-    const value = scripted[index++] ?? (1 + Math.floor((state.rng / 0x100000000) * sides))
-    if (!Number.isInteger(value) || value < 1 || value > sides) throw new Error(`Invalid D${sides} result for ${label}.`)
-    history.push({ sides, value, label })
-    return value
-  }
-}
+export const makeRoller = positionRoller
 export function chooseSpace(names, roll, label) {
   if (!names.length) return null
   if (names.length === 1) return names[0]
@@ -833,32 +820,35 @@ function planBritonMarch(state,faction,roll,{oneSpace,allowedFeat,blueConsent,fr
   const canSpend = () => dux ? duxFunds(draft,blueConsent) : draft.tracks.blue
   const startFunds = dux ? duxFunds(state,blueConsent) : state.tracks.blue
   if (startFunds < fee) return null
-  const targets = REGIONS.flatMap(({name,terrain}) => {
-    if (terrain === 'City' || targetFilter && !targetFilter(name)) return []
-    const space = state.land[name]
-    const shared = !isFragmentation(state)
-    const tension = dux && shared && botHasHuman(state,'c') && (state.tracks.wealth > state.tracks.prestige || shieldsOf(state).c > 0)
-    const isCivil = tension && friendlyControl(state,name,'c') && !hasStronghold(space,['d'])
-    const threat = ['x','s',...(!shared ? [dux ? 'c' : 'd'] : [])]
-    const enemy = threat.filter(side => native(state,name,side))
-    const strongEnemy = enemy.filter(side => hasStronghold(space,[side]))
-    const priority = isCivil ? 3 : strongEnemy.length ? 2 : (!dux && !friendlyControl(state,name,'c')) || enemy.length ? 1 : 0
-    if (!priority) return []
-    const scoresByFaction = scores(state)
-    const priority2 = dux
-      ? priority === 2 && strongEnemy.some(side => ['s','x'].includes(side) && state.tracks[side] > 20)
-        ? 3 : +(!friendlyControl(state,name,'d'))
-      : priority === 2 ? Math.max(...strongEnemy.map(side => scoresByFaction[side].margin)) : +(enemy.some(side => ['s','x'].includes(side)))
-    return [{name,isCivil,enemy,rank:[...(targetRank?.(name) ?? []),priority,priority2]}]
-  })
-  if (!targets.length) return null
   const draft = clone(state)
   const notes = []
   let feat = null
+  // §8.8.6 selects destinations after Invite has changed the position.
   if (dux && allowedFeat) {
     const invite = botInvite(draft,'d',roll,blueConsent)
     if (invite) {feat = 'Invite';notes.push(invite)}
   }
+  if (canSpend() < fee) return null
+  const shared = !isFragmentation(draft)
+  const tension = dux && shared && botHasHuman(draft,'c') &&
+    (draft.tracks.wealth > draft.tracks.prestige || shieldsOf(draft).c > 0)
+  const scoresByFaction = scores(draft)
+  const targets = REGIONS.flatMap(({name,terrain}) => {
+    if (terrain === 'City' || targetFilter && !targetFilter(name)) return []
+    const space = draft.land[name]
+    const isCivil = tension && friendlyControl(draft,name,'c') && !hasStronghold(space,['d'])
+    const threat = ['x','s',...(!shared ? [dux ? 'c' : 'd'] : [])]
+    const enemy = threat.filter(side => native(draft,name,side))
+    const strongEnemy = enemy.filter(side => hasStronghold(space,[side]))
+    const priority = isCivil ? 3 : strongEnemy.length ? 2 : (!dux && !friendlyControl(draft,name,'c')) || enemy.length ? 1 : 0
+    if (!priority) return []
+    const priority2 = dux
+      ? priority === 2 && strongEnemy.some(side => ['s','x'].includes(side) && draft.tracks[side] > 20)
+        ? 3 : +(!friendlyControl(draft,name,'d'))
+      : priority === 2 ? Math.max(...strongEnemy.map(side => scoresByFaction[side].margin)) : +(enemy.some(side => ['s','x'].includes(side)))
+    return [{name,isCivil,enemy,rank:[...(targetRank?.(name) ?? []),priority,priority2]}]
+  })
+  if (!targets.length) return null
   const rolled = dux ? roll(4,'Dux March · space limit') : 4
   const destinationLimit = oneSpace ? 1 : Math.min(rolled,targetLimit ?? rolled)
   const originLimit = dux && !oneSpace ? rolled : destinationLimit
@@ -887,7 +877,9 @@ function planBritonMarch(state,faction,roll,{oneSpace,allowedFeat,blueConsent,fr
       if (dux) {
         const present = sum(duxGroups.map(key => on(draft.land[target.name],key)))
         const enemies = target.isCivil ? ['c'] : target.enemy
+        const legal = battleEnemies(draft,target.name,'d')
         if (present && enemies.length && enemies.some(side => {
+          if (!legal.includes(side)) return false
           const outcome = battleForecast(draft,{name:target.name,attacker:'d',defender:side,source:'Battle'})
           const count = piecesByOwner(draft.land[target.name],{strongholds:false})[side]
           return outcome.defenderLosses >= count+ownedStrongholds(draft.land[target.name],side).length
