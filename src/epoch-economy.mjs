@@ -39,6 +39,16 @@ const epochEconomy = (() => {
 
   function randomIndex(length,roll,label) {
     if (length === 1) return 0
+    if (length > 6) {
+      let range = 6
+      while (range < length) range *= 6
+      let index
+      do {
+        index = 0
+        for (let places = range; places > 1; places /= 6) index = index*6 + roll(6,label)-1
+      } while (index >= length)
+      return index
+    }
     const sides = length > 4 ? 6 : 4
     let value
     do { value = roll(sides,label) } while (value > length)
@@ -113,11 +123,12 @@ const epochEconomy = (() => {
     space.units[key][0]--
     if (hadPlunder) space.units[key][1]--
   }
-  function relocateUnits(state,from,to,key,count) {
+  function relocateUnits(state,from,to,key,count,report) {
     if (!count || from===to) return
     const space = state.land[from]
     const carry = Math.max(0,count - (on(space,key) - loaded(space,key)))
     moveUnits(state,from,to,key,count,carry)
+    report?.moves.push({from,to,key,count})
   }
   function selectRoster(state,keys,count,roll,label,priority = keys,exact = {}) {
     const eligible = names.flatMap(name => keys.flatMap(key => {
@@ -187,7 +198,7 @@ const epochEconomy = (() => {
   function allocation(input,prefix) {
     return Object.fromEntries(Object.entries(input).filter(([key])=>key.startsWith(prefix)).map(([key,value])=>[key.slice(prefix.length),value]))
   }
-  function houseAssign(state,key,destinations,faction,input,roll,desc) {
+  function houseAssign(state,key,destinations,faction,input,roll,desc,report) {
     if (!destinations.length) return
     const total = troopsOnMap(state,key)
     if (!total) return
@@ -207,17 +218,82 @@ const epochEconomy = (() => {
         counts[choice]++
       }
     }
+    applyQuarters(state,key,counts,report)
+  }
+  function applyQuarters(state,key,counts,report) {
+    const destinations = Object.entries(counts)
     for (const from of names) {
       const source = state.land[from]
       let excess = on(source,key) - (counts[from] ?? 0)
       if (excess < 1) continue
-      for (const to of destinations) {
+      for (const [to,count] of destinations) {
         const target = state.land[to]
-        const moving = Math.min(excess,counts[to]-on(target,key))
+        const moving = Math.min(excess,count-on(target,key))
         if (moving < 1) continue
-        relocateUnits(state,from,to,key,moving)
+        relocateUnits(state,from,to,key,moving,report)
         excess -= moving
       }
+    }
+  }
+  function civFoederatiQuarters(state,settlements,roll,report) {
+    const keys = ['cxw','csw']
+    const [saxons,scotti] = keys.map(key => settlements[key].length ? troopsOnMap(state,key) : 0)
+    if (!saxons && !scotti) return
+
+    const spaces = names.filter(name => (saxons && settlements.cxw.includes(name)) || (scotti && settlements.csw.includes(name)))
+    const draft = {...state,land:Object.fromEntries(spaces.map(name => [name,clone(state.land[name])]))}
+    const allocations = spaces.map(name => {
+      const maxSaxons = settlements.cxw.includes(name) ? saxons : 0
+      const maxScotti = settlements.csw.includes(name) ? scotti : 0
+      const options = []
+      for (let x = 0; x <= maxSaxons; x++) {
+        draft.land[name].units.cxw[0] = x
+        for (let s = 0; s <= maxScotti; s++) {
+          draft.land[name].units.csw[0] = s
+          const owner = control(draft,name)
+          options.push({x,s,pop:owner === 'b' || owner === 'c' ? draft.land[name].pop : 0})
+        }
+      }
+      return options
+    })
+    // The nationalities can share a Settlement Region's Control. Score the remaining
+    // Regions jointly so neither nationality overfills a Region the other could hold.
+    const memo = spaces.map(() => new Map())
+    function bestPopulation(index,x,s) {
+      if (index === spaces.length) return x || s ? -Infinity : 0
+      const key = x*(scotti+1)+s
+      const cache = memo[index]
+      if (cache.has(key)) return cache.get(key)
+      let best = -Infinity
+      for (const option of allocations[index]) {
+        if (option.x <= x && option.s <= s) {
+          best = Math.max(best,option.pop+bestPopulation(index+1,x-option.x,s-option.s))
+        }
+      }
+      cache.set(key,best)
+      return best
+    }
+    const counts = {cxw:{},csw:{}}
+    let x = saxons
+    let s = scotti
+    for (const [index,name] of spaces.entries()) {
+      const best = bestPopulation(index,x,s)
+      const tied = allocations[index].filter(option => option.x <= x && option.s <= s &&
+        option.pop+bestPopulation(index+1,x-option.x,s-option.s) === best)
+      const selected = tied[randomIndex(tied.length,roll,'Civitates Foederati quarters · '+name)]
+      if (saxons && settlements.cxw.includes(name)) counts.cxw[name] = selected.x
+      if (scotti && settlements.csw.includes(name)) counts.csw[name] = selected.s
+      x -= selected.x
+      s -= selected.s
+    }
+
+    const before = report && boardTotals(state).pop.c
+    const moveCount = report?.moves.length
+    for (const key of keys) applyQuarters(state,key,counts[key],report)
+    if (report) {
+      const after = boardTotals(state).pop.c
+      report.notes.push(`Best legal Foederati quarters: Briton-controlled Population ${before} → ${after}.`)
+      if (report.moves.length === moveCount) report.notes.push('The current Foederati quarters already attain that maximum.')
     }
   }
   function nearest(origin,destinations) {
@@ -254,21 +330,26 @@ const epochEconomy = (() => {
     }
     return randomSpace(possible,roll,NAMES[faction]+' redeployment')
   }
-  function combineOrDisband(state,key,from,destinations,faction,input,roll,disband) {
+  function combineOrDisband(state,key,from,destinations,faction,input,roll,disband,report) {
     const space = state.land[from]
     if (!on(space,key) || destinations.includes(from)) return
     if (!destinations.length) {
-      if (disband) space.units[key] = [0,0]
+      if (disband) {
+        report?.moves.push({from,to:'Available',key,count:on(space,key)})
+        space.units[key] = [0,0]
+      }
       return
     }
     const where = chooseQuarters(state,from,key,destinations,faction,input,roll)
-    relocateUnits(state,from,where,key,on(space,key))
+    relocateUnits(state,from,where,key,on(space,key),report)
   }
-  function releaseFoederati(state,employer,nation) {
+  function releaseFoederati(state,employer,nation,report) {
     const key = employer+nation+'w'
     for (const name of names) {
       const space = state.land[name]
-      space.units[nation+'w'][0] += on(space,key)
+      const count = on(space,key)
+      if (count) report?.notes.push(`${name} · ${count} ${groupLabel(key)} become independent because their matching Settlements are gone.`)
+      space.units[nation+'w'][0] += count
       space.units[nation+'w'][1] += loaded(space,key)
       space.units[key] = [0,0]
     }
@@ -311,7 +392,7 @@ const epochEconomy = (() => {
           ...['x','s'].flatMap(nation=>houseFields(state,'d'+nation+'w',siteNames(siteList(state,nation+'s','d'))))] : [])],
     }
   }
-  function duxUpkeep(state,input,roll) {
+  function duxUpkeep(state,input,roll,report) {
     const gold = clearPlunder(state,['cav',...redFoederati],'red')
     const forts = siteList(state,'fort')
     const discount = marker(state,67,'shaded') ? 2 : 1
@@ -331,11 +412,12 @@ const epochEconomy = (() => {
       else state.roads = false
       roadLine = maintain ? ' Roads maintained for 10.' : ' Roads were abandoned.'
     }
-    houseAssign(state,'cav',siteNames(kept),'d',input,roll,'Cavalry quarters')
+    if (!kept.length && troopsOnMap(state,'cav')) report?.notes.push('Cavalry stay in place because no maintained Fort remains.')
+    houseAssign(state,'cav',siteNames(kept),'d',input,roll,'Cavalry quarters',report)
     for (const nation of ['x','s']) {
       const towns = siteNames(siteList(state,nation+'s','d'))
-      if (towns.length) houseAssign(state,'d'+nation+'w',towns,'d',input,roll,'Dux Foederati quarters')
-      else releaseFoederati(state,'d',nation)
+      if (towns.length) houseAssign(state,'d'+nation+'w',towns,'d',input,roll,'Dux Foederati quarters',report)
+      else releaseFoederati(state,'d',nation,report)
     }
     const fractions = {rm:[1,1],rc:[2,3],am:[1,2],ac:[1,2],f:[1,1]}
     const [numerator,denominator] = fractions[state.imperium]
@@ -373,7 +455,7 @@ const epochEconomy = (() => {
     }
     return {help:'Stow Civitates Plunder, thin Militia, pay Comitates, discard Refugees, and redeploy. Active Upkeep capabilities are included.',fields}
   }
-  function civUpkeep(state,input,roll) {
+  function civUpkeep(state,input,roll,report) {
     const gold = clearPlunder(state,['mil','com',...blueFoederati],'wealth')
     let lines = ''
     if (marker(state,27,'unshaded')) {
@@ -413,20 +495,31 @@ const epochEconomy = (() => {
     state.tracks.refugees = Math.floor(state.tracks.refugees/2)
     const strongholds = civSites(state)
     for (const key of ['mil','com']) {
-      for (const from of names) combineOrDisband(state,key,from,strongholds,'c',input,roll,false)
+      for (const from of names) combineOrDisband(state,key,from,strongholds,'c',input,roll,false,report)
     }
+    if (!strongholds.length && (troopsOnMap(state,'mil') || troopsOnMap(state,'com'))) {
+      report?.notes.push('Militia and Comitates stay in place because no Town or Hillfort remains.')
+    }
+    const settlements = {}
     for (const nation of ['x','s']) {
-      const settlements = siteNames(siteList(state,nation+'s','c'))
       const key = 'c'+nation+'w'
-      if (!settlements.length) {
-        releaseFoederati(state,'c',nation)
-      } else if (human(state,'c') && settlements.some(name=>hasInput(input,`quarters-${key}-${name}`))) {
-        houseAssign(state,key,settlements,'c',input,roll,'Civitates Foederati quarters')
-      } else {
+      settlements[key] = siteNames(siteList(state,nation+'s','c'))
+      if (!settlements[key].length) releaseFoederati(state,'c',nation,report)
+    }
+    if (!human(state,'c')) {
+      civFoederatiQuarters(state,settlements,roll,report)
+    } else {
+      for (const key of blueFoederati) {
+        const destinations = settlements[key]
+        if (!destinations.length) continue
+        if (destinations.some(name=>hasInput(input,`quarters-${key}-${name}`))) {
+          houseAssign(state,key,destinations,'c',input,roll,'Civitates Foederati quarters',report)
+          continue
+        }
         for (const from of boxesWith(state,[key])) {
-          if (settlements.includes(from)) continue
-          const where = chooseQuarters(state,from,key,settlements,'c',input,roll,false)
-          relocateUnits(state,from,where,key,on(state.land[from],key))
+          if (destinations.includes(from)) continue
+          const where = chooseQuarters(state,from,key,destinations,'c',input,roll,false)
+          relocateUnits(state,from,where,key,on(state.land[from],key),report)
         }
       }
     }
@@ -439,7 +532,7 @@ const epochEconomy = (() => {
       fields:human(state,faction) ? nearestFields(state,[faction+'w'],strongholds) : [],
     }
   }
-  function barbarianUpkeep(state,faction,input,roll) {
+  function barbarianUpkeep(state,faction,input,roll,report) {
     const r = faction+'r'
     const w = faction+'w'
     let raiders = 0
@@ -455,7 +548,7 @@ const epochEconomy = (() => {
     changeTrack(state,faction,loot)
     const settlements = siteNames(siteList(state,faction+'s'))
     const disbanded = settlements.length ? 0 : troopsOnMap(state,w)
-    for (const name of names) combineOrDisband(state,w,name,settlements,faction,input,roll,true)
+    for (const name of names) combineOrDisband(state,w,name,settlements,faction,input,roll,true,report)
     state.tracks[faction] = Math.max(faction==='x' ? 10 : 6,state.tracks[faction])
     return `${NAMES[faction]} returned ${raiders} Raiders and ${loot} Plunder. ${disbanded ? `${disbanded} Warbands disbanded.` : 'Warband redeployment complete.'} Renown ${state.tracks[faction]}.`
   }
@@ -741,16 +834,27 @@ const epochEconomy = (() => {
     if (faction==='c') return civUpkeepChoices(state,input)
     return faction ? barbarianUpkeepChoices(state,faction) : null
   }
-  function run(state,phase,input,roll) {
+  function run(state,phase,input,roll,report) {
     if (phase==='Epoch Event') return runEvent(state,input,roll)
-    if (phase==='Dux Upkeep') return duxUpkeep(state,input,roll)
-    if (phase==='Civitates Upkeep') return civUpkeep(state,input,roll)
     const faction = phaseFaction[phase]
-    if (faction) return barbarianUpkeep(state,faction,input,roll)
+    if (report && faction) {
+      const humanChoice = human(state,faction)
+      report.priority = {
+        d:humanChoice ? '§6.6.1. Cavalry use maintained Forts and red Foederati use matching Settlements.' :
+          '§8.8.7. The Non-player Dux spreads Cavalry evenly among maintained Forts and red Foederati evenly among matching Settlements.',
+        c:humanChoice ? '§6.6.2. Militia and Comitates use the nearest Town or Hillfort. Foederati use blue Settlements of their own Nation.' :
+          '§§6.6.2 and 8.7.7. Militia and Comitates use the nearest Town or Hillfort, choosing by Control when equidistant. Blue Foederati use matching Settlements to maximize Briton-controlled Population, with random ties.',
+        x:'§6.6.3. Saxon Warbands go to the nearest independent Saxon Stronghold or become Available if none remains.',
+        s:'§6.6.3. Scotti Warbands go to the nearest independent Scotti Stronghold or become Available if none remains.',
+      }[faction]
+    }
+    if (faction==='d') return duxUpkeep(state,input,roll,report)
+    if (faction==='c') return civUpkeep(state,input,roll,report)
+    if (faction) return barbarianUpkeep(state,faction,input,roll,report)
     throw new Error('Unknown Epoch economy phase.')
   }
   return { choices, run }
 })()
 
 export const epochChoices = (state,phase,input = {}) => epochEconomy.choices(state,phase,input)
-export const runEpochEconomy = (state,phase,input = {},roll) => epochEconomy.run(state,phase,input,roll)
+export const runEpochEconomy = (state,phase,input = {},roll,report) => epochEconomy.run(state,phase,input,roll,report)

@@ -138,6 +138,16 @@ function distinctChoices(units) {
   })
 }
 function scoreLoss(units,cost) { return units.reduce((n,unit) => n+cost(unit),0) }
+function describeVolley(units,garrison,garrisonStrike,hits,describeStrike) {
+  const groups = new Map()
+  for (const unit of units) {
+    const strike = describeStrike(unit)
+    const id = [unit.key,strike.loss,...strike.modifiers].join('/')
+    if (!groups.has(id)) groups.set(id,{key:unit.key,count:0,...strike})
+    groups.get(id).count++
+  }
+  return {garrison,garrisonStrike,units:[...groups.values()],hits:hits/8}
+}
 
 export function runBattle(state,config,roll,reply = null) {
   const {name,attacker,defender} = config
@@ -147,6 +157,7 @@ export function runBattle(state,config,roll,reply = null) {
   const [attacking,defending] = battleSides(state,attacker,defender)
   const civilBattle = !isFragmentation(state) && attacking.every(briton) && defending.every(briton)
   const details = []
+  const field = []
   const assaults = []
   const bellorum = (units,lead,fortDefends = false) => {
     if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
@@ -176,27 +187,36 @@ export function runBattle(state,config,roll,reply = null) {
     ensure(options.some(option => option.value === value), 'The Battle choice no longer matches this position.')
     return value
   }
-  const pickUnit = (stage,title,units,preferred,ask,allowNone=false) => {
+  const pickUnit = (stage,title,units,preferred,ask) => {
     const options = distinctChoices(units)
     const menu = options.map(unit => ({value:unit.id,label:labelUnit(unit)}))
-    if (allowNone) menu.push({value:'none',label:'Done with this step'})
     const picked = choose(stage,title,menu,(options.find(unit => preferred && unit.key === preferred.key && unit.gold === preferred.gold)?.id ?? 'none'),ask)
     return options.find(unit => unit.id === picked)
   }
   const omens = { field:new Set(), assault:new Set() }
-  const useOmens = (phase, eligibleUnits) => {
+  const useOmens = (phase,eligibleUnits,stronghold) => {
     const holder = state.omens?.holder
-    if (!holder || holder === attacker || !eligibleUnits.length || !humanSide(state,holder) || config.ignoreTactics) return
-    const decision = choose(phase,'Discard Omens to halve chosen Units?',[
+    if (!holder || holder === attacker || !eligibleUnits.length || !humanSide(state,holder) || !reply || config.ignoreTactics) return
+    const stage = phase === 'field' ? 'Field Battle' : 'Assault'
+    const target = stronghold ? ' at '+stronghold : ' in the Field Battle'
+    const decision = choose(stage,'Discard Omens to halve chosen Units'+target+'?',[
       {value:'skip',label:'Keep Omens'}, {value:'play',label:'Discard Omens for this fight'},
     ],'skip',true)
     if (decision !== 'play') return
-    const remaining = [...eligibleUnits]
-    for (;;) {
-      const unit = pickUnit(phase,'Choose a Unit to halve',remaining,null,true,true)
-      if (!unit) break
-      omens[phase].add(unit.id)
-      remaining.splice(remaining.indexOf(unit),1)
+    const groups = distinctChoices(eligibleUnits).map(unit =>
+      eligibleUnits.filter(other => other.key === unit.key && other.gold === unit.gold))
+    const counts = groups.map(units => ({label:labelUnit(units[0]),max:units.length}))
+    const none = counts.map(() => 0).join(',')
+    const all = counts.map(({max}) => max).join(',')
+    const answer = reply({stage,title:'Choose how many Units to halve'+target,counts,
+      options:[{value:none,label:'None'}, {value:all,label:'All'}],defaultValue:none,
+      progress:[...details],context:battleContext(),
+    })
+    const numbers = typeof answer === 'string' ? answer.split(',') : []
+    ensure(numbers.length === counts.length && numbers.every((value,i) => /^\d+$/.test(value) && Number(value) <= counts[i].max),
+      'Choose an available count of each Unit to halve.')
+    for (const [index,units] of groups.entries()) {
+      for (const unit of units.slice(0,Number(numbers[index]))) omens[phase].add(unit.id)
     }
     state.omens = null
     details.push(`Omens halves ${omens[phase].size} Units during ${phase === 'field' ? 'Field Battle' : 'Assault'}.`)
@@ -205,11 +225,14 @@ export function runBattle(state,config,roll,reply = null) {
   const forceOf = unit => participants.includes(unit) ? participants : defenders
   const alliedStriker = (unit,survives = stillPresent) => activeSide(state,33,'unshaded') && ['cav','mil','com'].includes(unit.key) &&
     forceOf(unit).some(other => survives(other) && other.owner !== unit.owner && ['cav','mil','com'].includes(other.key))
+  const badonMilitia = unit => unit.key === 'mil' && activeSide(state,28,'unshaded') && land.sites.some(site => site?.piece === 'hill')
+  const bellorumMilitia = (unit,survives = stillPresent) => unit.key === 'mil' && activeSide(state,16,'unshaded') &&
+    forceOf(unit).some(other => survives(other) && ['cav','dxw','dsw'].includes(other.key))
+  const fensCavalry = unit => activeSide(state,46,'shaded') && unit.key === 'cav' && BY_NAME[name].terrain === 'Fens'
   const fieldUnit = (unit,survives = stillPresent) => {
     let value = unitStrength(unit)
-    if (unit.key === 'mil' && (activeSide(state,28,'unshaded') && land.sites.some(site => site?.piece === 'hill') ||
-      activeSide(state,16,'unshaded') && forceOf(unit).some(other => survives(other) && ['cav','dxw','dsw'].includes(other.key)))) value = 4
-    if (activeSide(state,46,'shaded') && unit.key === 'cav' && BY_NAME[name].terrain === 'Fens') value = 2
+    if (badonMilitia(unit) || bellorumMilitia(unit,survives)) value = 4
+    if (fensCavalry(unit)) value = 2
     if (affectedWarband(unit)) value /= 2
     return value / (omens.field.has(unit.id) ? 2 : 1)
   }
@@ -375,9 +398,26 @@ export function runBattle(state,config,roll,reply = null) {
     const volley = fieldVolley(a,d,selector,struck)
     if (!volley) return
     const {aHits,dHits,aLoss,dLoss,weights} = volley
+    const describe = unit => ({
+      base:unitStrength(unit)/4, bonus:alliedStriker(unit) ? 0.5 : 0, loss:fieldStrike(unit)/8,
+      modifiers:[
+        badonMilitia(unit) && '#28 Mons Badonicus',
+        bellorumMilitia(unit) && '#16 Dux Bellorum',
+        alliedStriker(unit) && '#33 With the Cross on his Shoulders',
+        fensCavalry(unit) && '#46 Dubglas River',
+        affectedWarband(unit) && '#64 Devastation',
+        omens.field.has(unit.id) && '#43 Omens',
+      ].filter(Boolean),
+    })
+    const toAttackers = !config.ignoreTactics && describeVolley(dHits,0,0,aLoss,describe)
+    const toDefenders = !config.ignoreTactics && describeVolley(aHits,0,0,dLoss,describe)
     markFought([...aHits,...dHits,...(aLoss ? a : []),...(dLoss ? d : [])])
-    removeLosses(a,aLoss,'field',stage,attacking.length > 1,null,weights)
-    removeLosses(d,dLoss,'field',stage,defending.length > 1,null,weights)
+    const attackerAbsorbed = removeLosses(a,aLoss,'field',stage,attacking.length > 1,null,weights)
+    const defenderAbsorbed = removeLosses(d,dLoss,'field',stage,defending.length > 1,null,weights)
+    if (toAttackers) field.push({phase:stage,
+      attackers:{...toAttackers,absorbed:attackerAbsorbed/8,removed:a.filter(unit => unit.dead).map(labelUnit)},
+      defenders:{...toDefenders,absorbed:defenderAbsorbed/8,removed:d.filter(unit => unit.dead).map(labelUnit)},
+    })
     details.push(`${stage}: attackers take ${qty(aLoss/2)}, defenders take ${qty(dLoss/2)}.`)
   }
   function projectedFieldRemovals(withdrawn = []) {
@@ -416,20 +456,15 @@ export function runBattle(state,config,roll,reply = null) {
   const assaultHits = (units,base = 8,garrison = 0) =>
     garrison*base + units.reduce((total,unit) => total+assaultStrike(unit,base),0)
   function describeAssaultVolley(units,base,garrison,hits) {
-    const strikes = new Map()
-    for (const unit of units) {
+    return describeVolley(units,garrison,base/8,hits,unit => {
       const bonus = assaultBonus(unit)
       const modifiers = [
         bonus ? '#33 With the Cross on his Shoulders' : null,
         affectedWarband(unit) ? '#64 Devastation' : null,
         omens.assault.has(unit.id) ? '#43 Omens' : null,
       ].filter(Boolean)
-      const loss = assaultStrike(unit,base)/8
-      const key = [unit.key,bonus,...modifiers].join('/')
-      if (!strikes.has(key)) strikes.set(key,{key:unit.key,count:0,base:base/8,bonus:bonus/8,loss,modifiers})
-      strikes.get(key).count++
-    }
-    return {garrison,garrisonStrike:base/8,units:[...strikes.values()],hits:hits/8}
+      return {base:base/8,bonus:bonus/8,loss:assaultStrike(unit,base)/8,modifiers}
+    })
   }
   const automaticCoup = config.assumeCoup && config.source === 'Event Battle' && onlySite !== undefined
   const coupPossible = (site,inside) => config.surprise && (automaticCoup || site.coupCapacity-inside.length+1 > 0)
@@ -532,19 +567,19 @@ export function runBattle(state,config,roll,reply = null) {
   }
   if (present(participants).length && !inField(defenders).length && !config.ravage && !config.noAssault && !config.siegeOnly) {
     let left = onlySite === undefined ? sortedSites : sortedSites.filter(site => site.index === onlySite)
-    for (let attempt=0; attempt<sites.length && present(participants).length; attempt++) {
-      if (!left.length) break
+    while (left.length && present(participants).length) {
+      omens.assault.clear()
       const preferred = [...left].sort((a,b)=>insideOf(a).length-insideOf(b).length).find(site=>projectedAssault(site,insideOf(site)).captures)
       const options = [{value:'none',label:'Skip Assault'},...left.map(site => ({value:String(site.index),label:BY_NAME[name].sites[site.index].name+' · '+PIECES[site.piece]}))]
       const selected = choose('Assault','Choose a Stronghold to assault',options,preferred ? String(preferred.index) : 'none',humanSide(state,attacker) && !config.ignoreTactics)
       if (selected === 'none') break
       const site = left.find(item => item.index === Number(selected))
-      if (attempt === 0) useOmens('assault',[...present(participants),...present(defenders).filter(unit => unit.site === site.index)])
-      site.used = true
       const inside = insideOf(site)
+      const stronghold = BY_NAME[name].sites[site.index].name
+      useOmens('assault',[...present(participants),...inside],stronghold)
+      site.used = true
       const assailants = present(participants)
       markFought([...assailants,...inside])
-      const stronghold = BY_NAME[name].sites[site.index].name
       const coupLimit = site.coupCapacity-inside.length+1
       const coup = config.surprise && (automaticCoup || (config.assumeCoup ? coupLimit > 0 : roll(6,'Coup de Main · '+stronghold) <= coupLimit))
       if (config.surprise) details.push(`Coup de Main ${coup ? 'succeeds' : 'fails'} (needs ${coupLimit} or less).`)
@@ -650,7 +685,7 @@ export function runBattle(state,config,roll,reply = null) {
   if (removedAtt.length) details.push(`Attacker losses · ${removedAtt.join(', ')}.`)
   if (removedDef.length) details.push(`Defender losses · ${removedDef.join(', ')}.`)
   return {
-    name, attacker, defender, details, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
+    name, attacker, defender, details, field, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
     prestigeChange:state.tracks.prestige-prestigeBefore, renownChange:(state.tracks[attacker] ?? 0)-renownBefore,
     defenderField:inField(defenders).length, attackerField:inField(participants).length,
     defenderStanding:present(defenders).length, attackerPlunder:present(participants).filter(unit => unit.gold).length,
@@ -665,6 +700,16 @@ export function runBattle(state,config,roll,reply = null) {
 export function battleForecast(state,config) {
   const after = clone(state)
   return runBattle(after,{...config,ignoreTactics:true},() => 6)
+}
+
+function countChoices(groups,limit) {
+  let choices = [[]]
+  for (const {max} of groups) {
+    if (choices.length*(max+1) > limit) return null
+    const counts = Array.from({length:max+1},(_,count) => count)
+    choices = choices.flatMap(choice => counts.map(count => [...choice,count]))
+  }
+  return choices.map(choice => choice.join(','))
 }
 
 export function raidReactionSafe(state,config,reacting) {
@@ -691,12 +736,14 @@ export function raidReactionSafe(state,config,reacting) {
     try {
       runBattle(after,config,sides => branch([sides,1]),prompt => {
         if (prompt.stage === 'Consequences') return prompt.defaultValue
-        const values = prompt.options.map(option => option.value)
+        const values = prompt.counts ? countChoices(prompt.counts,512-attempts) : prompt.options.map(option => option.value)
+        if (!values) throw new BattleChoice({choices:null})
         return branch([prompt.defaultValue,...values.filter(value => value !== prompt.defaultValue)])
       })
       if (remaining(after) < (reacting === 'd' ? start : 1)) return false
     } catch (error) {
       if (!(error instanceof BattleChoice)) throw error
+      if (!error.prompt.choices) return false
       for (const choice of error.prompt.choices.reverse()) paths.push([...path,choice])
     }
     // Decline if a large position cannot be shown safe within the preview budget.

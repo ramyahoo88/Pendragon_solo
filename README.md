@@ -1,4 +1,4 @@
-# Pendragon Solo Companion v0.3.4
+# Pendragon Solo Companion v0.3.5
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
@@ -30,7 +30,9 @@ cmp dist/index.html /tmp/pendragon-rebuild.html
 - Start a physical-deck game as Civitates with #57 Myrddin current and #22 next. Select a revealed card's title to read its effect. Preview the Scotti action to see the Command and Feat the bot selects for Myrddin. If a Battle needs your faction's tactics, the app asks for them before showing the result.
 - Open **Saves → New game** to select a scenario, seat, difficulty, and deck. Petty Tyrants applies Entropy during setup if you select Both Britons. The map and list show faction forces and Strongholds. **Choose on map** fills a Command target from its available spaces. Use the Board correction controls to match a physical position or record a tabletop ruling.
 - Open **Victory outlook** to see current margins and requirements. At the Victory phase the preview shows whether play continues or who wins before you apply it. Non-player previews show the applicable decision rule next to their recorded rolls.
-- Open **Battle calculations** in an Assault preview to see what each side inflicted and which units were removed in Escalade and Storm. Annona lists the groups the bot Dux covers before you choose payments and shows the Civitates share in Resources and Wealth.
+- Open **Battle calculations** in a preview or its Journal entry to see strikes and losses in Field Battle, Escalade, and Storm. Omens lets you choose how many units to halve from each group in one confirmation. The effect lasts for the selected Field Battle or Assault.
+- In **Battle + Entreat**, choose **When to Entreat** to resolve it before, between, or after Battles. The calculator checks available replacements at that point.
+- Upkeep previews list redeployments, Control before and after, and the allocation rule. The Civitates bot can split and redistribute blue Foederati across matching Settlements to maximize controlled Population. Annona also shows the Civitates share in Resources and Wealth after the Dux allocation.
 - Filter the **Journal** by card, Epoch, acting faction, or a space mentioned in the entry. Search the entries by text, including recorded die rolls. If a bot preview stops, the error dialog lets you retry or export a diagnostic save for that position.
 
 ## Rules coverage
@@ -52,11 +54,11 @@ Under shaded #16 Dux Bellorum, Civitates-led attacks with Militia leave Dux unit
 
 ## Verification
 
-The 170 scripted tests include the natural March blocker at seed 736202, the unshaded #33 Escalade result and its neighboring cases, and Dux-first payments during Epoch Annona and shaded #10. The three earlier Mistborn saves and the other Battle, Event, scenario, and save tests also pass.
+The 187 scripted tests include the three v0.3.4 audit positions and additional cases for split Foederati stacks, Entreat between Battles, Omens expiring before another Assault's projection, and Battle calculations surviving a save round trip. The earlier March, Escalade, Annona, Mistborn, and save regression tests also pass.
 
 Each campaign sweep runs every combination of scenario, seat, and difficulty with two simple policies. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. The sweep accepts `--tactics=first` or `--tactics=last` to exercise choices other than the defaults. If a planner fails, the summary includes the path to an importable save.
 
-All 960 games across five v0.3.4 sweeps reached scoring. Those runs used the baseline, `--fresh`, seed block 733000 with defaults, seed block 735000 with last choices, and seed block 737000 with first choices. They completed 31,896 bot turns and exercised all 76 ordinary and Pivotal Event IDs.
+All 768 games across four v0.3.5 sweeps reached scoring. They used the baseline, seed block 815000 with default choices, seed block 817000 with last choices, and seed block 819000 with first choices. They completed 25,219 bot turns and 6,689 tactical choices.
 
 ## References
 

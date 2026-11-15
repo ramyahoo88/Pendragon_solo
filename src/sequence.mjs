@@ -1,4 +1,4 @@
-import { EPOCHS, EPOCH_PHASES, FACTIONS, NAMES, PIVOTAL, REGIONS } from './data.mjs'
+import { BY_NAME, EPOCHS, EPOCH_PHASES, FACTIONS, GROUP, NAMES, PIVOTAL, REGIONS } from './data.mjs'
 import { card } from './cards.mjs'
 import { makeScenarioDeck, scenarioDeckSize, scenarioInfo, validateRevealedDeck } from './scenarios.mjs'
 import { addProsperity, boardTotals, changeTrack, clone, control, countStrongholds, ensure, goldAvailable, groupLabel, humanFactions, inRange, isHumanFaction, isFragmentation, isRoman, loaded, makeRoller, on, own, plunderTo, scores, setImperium, spendCivitates, spendDux, duxFunds, sum, validatePosition } from './position.mjs'
@@ -35,8 +35,10 @@ export function resolveOmens(state, use) {
   if (use) state.omens = { holder:null, head:faction, card:state.current }
   return use
 }
-export function log(state, title, detail = '', dice = []) {
-  state.log.push({ title, detail, dice, card: state.current, epoch: state.epoch })
+export function log(state, title, detail = '', dice = [], battles = []) {
+  const entry = { title, detail, dice, card: state.current, epoch: state.epoch }
+  if (battles.length) entry.battles = battles
+  state.log.push(entry)
 }
 function reveal(state,id,allowedEnd = false) {
   if (id === null && allowedEnd) {
@@ -151,7 +153,7 @@ export function settleEntropy(state,chosen = null) {
   state.entropy = null
   log(state,'Entropy',`${NAMES[humans.find(faction => faction !== keep)]} becomes a Non-player. You continue as ${NAMES[keep]} (§8.9).`)
 }
-export function finishAction(state, option, description, detail = '', dice = [], overrides = {}) {
+export function finishAction(state, option, description, detail = '', dice = [], overrides = {}, battles = []) {
   const faction = turn(state)
   ensure(actionOptions(state).includes(option), 'That choice is unavailable in the current sequence slot.')
   if (option === 'pass') {
@@ -161,7 +163,7 @@ export function finishAction(state, option, description, detail = '', dice = [],
   if (isPivotalCard(state.current) && option === 'event') state.pivotal[faction] = 'used'
   Object.assign(state.overrides, overrides)
   state.acts.push({ faction, option, description })
-  log(state, `${NAMES[faction]} · ${description}`, detail, dice)
+  log(state, `${NAMES[faction]} · ${description}`, detail, dice, battles)
   const done = closeCardIfDone(state)
   settleEntropy(state)
   return done
@@ -526,6 +528,27 @@ export function advanceEpoch(state, info = {}, replacement = null) {
   }
   return state
 }
+export function validBattleCalculations(battles) {
+  const text = value => typeof value === 'string' && value.length < 120
+  const strength = value => Number.isFinite(value) && value >= 0 && value <= 256
+  const volley = side => Boolean(side) && [side.garrisonStrike,side.hits].every(strength) &&
+    inRange(side.garrison,0,4) && (side.garrisonLost === undefined || inRange(side.garrisonLost,0,4)) &&
+    (side.absorbed === undefined || strength(side.absorbed)) && (side.double === undefined || typeof side.double === 'boolean') &&
+    Array.isArray(side.units) && side.units.length <= 100 && side.units.every(unit => !!unit && own(GROUP,unit.key) &&
+      inRange(unit.count,1,100) && [unit.base,unit.bonus,unit.loss].every(strength) &&
+      Array.isArray(unit.modifiers) && unit.modifiers.length <= 6 && unit.modifiers.every(text)) &&
+    Array.isArray(side.removed) && side.removed.length <= 100 && side.removed.every(text)
+  return Array.isArray(battles) && battles.length < 70 && battles.every(battle => Boolean(battle) && own(BY_NAME,battle.name) &&
+    Array.isArray(battle.field) && battle.field.length <= 4 && battle.field.every(step => !!step &&
+      ['Trap','Charge / Ambush','Melee','Harass'].includes(step.phase) && volley(step.attackers) && volley(step.defenders)) &&
+    Array.isArray(battle.assaults) && battle.assaults.length <= 2*BY_NAME[battle.name].sites.length && battle.assaults.every(step => {
+      if (!step || !BY_NAME[battle.name].sites.some(site => site.name === step.stronghold)) return false
+      if (step.phase === 'Escalade') {
+        return step.skipped === true || step.skipped === undefined && step.defenders === undefined && volley(step.attackers)
+      }
+      return step.phase === 'Storm' && step.skipped === undefined && volley(step.attackers) && volley(step.defenders)
+    }))
+}
 export function validateSave(state, options) {
   validatePosition(state,options)
   ensure(inRange(state.rng,1,0xffffffff), 'The save has an invalid die state.')
@@ -548,7 +571,8 @@ export function validateSave(state, options) {
   ensure(state.result === null || (FACTIONS.includes(state.result?.winner) && ['threshold','final'].includes(state.result.reason) && state.result.won === isHumanFaction(state,state.result.winner) && Array.isArray(state.result.rank) && state.result.rank.every(f => FACTIONS.includes(f))), 'Invalid victory result.')
   ensure(Array.isArray(state.log) && state.log.length < 1050 && state.log.every(entry => {
     return typeof entry?.title === 'string' && entry.title.length < 250 && typeof entry.detail === 'string' && entry.detail.length < 3000 &&
-      Array.isArray(entry.dice) && entry.dice.every(die => typeof die?.label === 'string' && [4,6].includes(die.sides) && inRange(die.value,1,die.sides))
+      Array.isArray(entry.dice) && entry.dice.every(die => typeof die?.label === 'string' && [4,6].includes(die.sides) && inRange(die.value,1,die.sides)) &&
+      (entry.battles === undefined || validBattleCalculations(entry.battles))
   }), 'Invalid campaign journal.')
   return state
 }

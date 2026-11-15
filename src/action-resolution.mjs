@@ -23,7 +23,7 @@ export function replayAction(state,job,answers=[]) {
       ...question,index,name:question.name ?? lastSpace,progress:[...data,...(question.progress || [])],
     })
     const answer = answers[index++]
-    ensure(question.options.some(option => option.value === answer),'A saved tactical choice is unavailable.')
+    if (!question.counts) ensure(question.options.some(option => option.value === answer),'A saved tactical choice is unavailable.')
     return answer
   }
   function finishDeepRaid(config,survivors,evaded) {
@@ -65,7 +65,9 @@ export function replayAction(state,job,answers=[]) {
     if (config.reactionFaction) data.push(NAMES[config.reactionFaction]+' forces Battle in '+config.name+'.')
     const report = runBattle(after,config,roll,reply)
     if (report.details.length) data.push(report.name+' · '+report.details.join(' '))
-    if (report.assaults.length) battles.push({name:report.name,assaults:report.assaults})
+    if (report.field.length || report.assaults.length) {
+      battles.push({name:report.name,field:report.field,assaults:report.assaults})
+    }
     if (config.afterDeepRaid) finishDeepRaid(config,Math.max(0,report.attackingRaiderSurvivors-report.attackerPlunder),report.attackerEvaded)
     return report
   }
@@ -137,8 +139,8 @@ export function replayAction(state,job,answers=[]) {
     if (afterRaid?.type === 'conspiratio-barbarica' || job.id === 73 && job.operation?.grant) saxonFollowUp()
     ensure(index === answers.length,'Tactical choices no longer match the saved campaign.')
     const detail = data.filter(Boolean).join(' ')
-    if (job.kind === 'action') finishAction(after,job.option,job.description,detail.slice(0,2940),dice,overrides)
-    if (job.kind === 'sample') log(after,'Sample Battle',detail.slice(0,2940),dice)
+    if (job.kind === 'action') finishAction(after,job.option,job.description,detail.slice(0,2940),dice,overrides,battles)
+    if (job.kind === 'sample') log(after,'Sample Battle',detail.slice(0,2940),dice,battles)
     return {after,dice,detail,battles}
   } catch (error) {
     if (error instanceof BattleChoice) return {prompt:error.prompt,dice}

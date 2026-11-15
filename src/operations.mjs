@@ -9,6 +9,8 @@ const check = (key,label) => ({key,label,type:'check',default:false})
 const countField = (key,label,defaultValue = '0') => ({key,label,type:'number',min:0,max:30,default:defaultValue})
 const spaceOption = names => names.map(name => [name,name])
 const selected = value => value === true || ['yes','on','1','true'].includes(value)
+const timedBattleFeat = feat => feat === 'Requisition' || feat === 'Entreat'
+const defaultBattleFeatTiming = (feat,input) => feat === 'Entreat' || selected(input.featBefore) ? 'before' : 'after'
 const humanHas = (state,faction) => humanFactions(state).includes(faction)
 const hasSide = (state,id,side) => state.markers[id]?.side === side
 const niallBox = 'niall-box'
@@ -126,13 +128,13 @@ export function militaryFields(state,faction,command,feat,options,input = {}) {
     const base = [pick('space','Battle space',spaceOption(names)),pick('enemy','Defender',enemies.map(key => [key,NAMES[key]]),false),
       ...(['Retaliate','Surprise','Ravage','Ransom'].includes(feat) ? [check('tactic','Use '+feat+' here')] : [])]
     const controls = feat === 'Reinforce' && !isFragmentation(state) ? [check('alliedConsent','Dux agrees to Reinforce')] : []
-    if (feat === 'Requisition') {
+    if (timedBattleFeat(feat)) {
       const targets = Math.max(1,Math.min(cap,Number(input.rows) || 1))
       const between = Array.from({length:targets-1},(_,i) => [String(i+1),'After Battle '+(i+1)])
       controls.push({
-        key:'featTiming',label:'When to Requisition',type:'select',
+        key:'featTiming',label:'When to '+feat,type:'select',
         options:[['before','Before the first Battle'],...between,['after','After the last Battle']],
-        default:selected(input.featBefore) ? 'before' : 'after',
+        default:defaultBattleFeatTiming(feat,input),
       })
     }
     return {
@@ -208,11 +210,11 @@ export function runMilitary(state,spec,roll,fight,reply) {
   const notes = []
   const support = (featInput=input,timing='') => {
     const note = runCommandFeat(state,{faction,command,feat,options,rows:featRows,input:featInput,battleSpaces:names},roll)
-    if (note) notes.push(timing ? `Requisition ${timing}. ${note}.` : note)
+    if (note) notes.push(timing ? `${feat} ${timing}. ${note}.` : note)
   }
   if (command === 'Battle' || command === 'Intercept') {
     if (['Surprise','Retaliate'].includes(feat)) ensure(new Set(rows.filter(row => selected(row.tactic)).map(row => row.space)).size <= 1,feat+' applies in a single space.')
-    if (['Pillage','Reinforce','Entreat'].includes(feat) && (!options.reinforceBonus || featRows.length)) support()
+    if (['Pillage','Reinforce'].includes(feat) && (!options.reinforceBonus || featRows.length)) support()
     if (command === 'Intercept') {
       const origins = [...new Set(rows.map(row => row.origin).filter(Boolean))]
       const payment = commandEconomy(state,faction,options,input)
@@ -246,12 +248,12 @@ export function runMilitary(state,spec,roll,fight,reply) {
       }
     }
     const tacticalSpace = rows.find(row => selected(row.tactic))?.space ?? names[0]
-    let requisitionAt = null
-    if (feat === 'Requisition') {
-      const timing = input.featTiming || (selected(input.featBefore) ? 'before' : 'after')
-      requisitionAt = timing === 'before' ? 0 : timing === 'after' ? names.length : Number(timing)
-      ensure(inRange(requisitionAt,0,names.length),'Choose when to Requisition during the selected Battles.')
-      if (requisitionAt === 0) support(input,'before the first Battle')
+    let featAt = null
+    if (timedBattleFeat(feat)) {
+      const timing = input.featTiming || defaultBattleFeatTiming(feat,input)
+      featAt = timing === 'before' ? 0 : timing === 'after' ? names.length : Number(timing)
+      ensure(inRange(featAt,0,names.length),'Choose when to '+feat+' during the selected Battles.')
+      if (featAt === 0) support(input,'before the first Battle')
     }
     for (const [index,name] of names.entries()) {
       const row = rows.find(item => item.space === name)
@@ -264,7 +266,7 @@ export function runMilitary(state,spec,roll,fight,reply) {
         shieldWall:feat === 'Shield Wall',retaliate,
         ravage:feat === 'Ravage' && selected(row.tactic),
         afterPlunder:feat === 'Ransom' && selected(row.tactic) ? () => { const note = applyRansom(state,name,roll,reply); if (note) notes.push(note.trim()) } : undefined})
-      if (requisitionAt === index+1) support(input,index+1 === names.length ? 'after the last Battle' : 'after the Battle in '+name)
+      if (featAt === index+1) support(input,index+1 === names.length ? 'after the last Battle' : 'after the Battle in '+name)
     }
     return notes.join(' ')
   }

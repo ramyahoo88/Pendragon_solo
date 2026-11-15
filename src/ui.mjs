@@ -373,7 +373,7 @@ function journalList(entries) {
   if (!entries.length) return '<p class="muted">No journal entries match these filters.</p>'
   return `<ul class="journal">${entries.map(entry => `<li><header><strong>${clean(entry.title)}</strong>
     <small class="muted">${entry.card ? '#'+clean(entry.card)+' · ' : ''}${entry.epoch ? 'Epoch '+clean(entry.epoch) : 'Before Epoch 1'}</small></header>
-    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
+    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${battleCalculations(entry.battles)}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
 }
 function journal(game) {
   if (!game.log.length) return panel('Campaign journal','<p class="muted">Card reveals, actions and Epoch results will appear here.</p>')
@@ -535,11 +535,31 @@ function botDecisionMarkup(decision,dice = []) {
   const rolled = dice.length ? ' The recorded rolls below include any random ties.' : ''
   return `<div class="callout small"><strong>Why this action</strong><p>${clean(decision.rule)} · ${clean(decision.detail)}${rolled}</p></div>`
 }
+function upkeepAllocations(report,before,after) {
+  if (!report?.priority) return ''
+  const moved = new Set(report.moves.flatMap(({from,to}) => [from,to]))
+  const rows = REGIONS.flatMap(({name}) => {
+    const a = control(before,name)
+    const b = control(after,name)
+    return a !== b || moved.has(name) ? [{name,a,b}] : []
+  })
+  const owner = id => id === 'b' ? 'Britons' : NAMES[id] ?? 'Uncontrolled'
+  const moves = report.moves.map(({from,to,key,count}) => `<li>${clean(from)} → ${clean(to)} · ${count} × ${clean(groupLabel(key))}</li>`)
+  return `<section class="callout small"><h3>Upkeep allocations</h3><p>${clean(report.priority)}</p>
+    ${moves.length ? `<ul class="guide-list">${moves.join('')}</ul>` : '<p>No Troops changed quarters.</p>'}
+    ${report.notes.map(note => `<p>${clean(note)}</p>`).join('')}
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Region</th><th>Control before</th><th>Control after</th></tr></thead>
+      <tbody>${rows.map(({name,a,b}) => `<tr><td>${clean(name)}</td><td>${clean(owner(a))}</td><td>${clean(owner(b))}</td></tr>`).join('')}</tbody></table></div>` :
+      '<p>Control stays the same in every space.</p>'}
+    </section>`
+}
 function showPreview(plan,back) {
   const endsGame = plan.after.result && !state().result
   const victory = endsGame ? `<section class="callout warm"><h3>${clean(victoryTitle(plan.after))}</h3>${victoryDetails(plan.after)}</section>`
     : plan.label === 'Victory' ? `<p class="muted">The campaign continues to ${clean(plan.after.epochPhase)}.</p>${victoryTable(plan.after)}` : ''
-  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}${diffList(state(),plan.after,Boolean(victory))}${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
+  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}
+    ${upkeepAllocations(plan.upkeep,state(),plan.after)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
+    ${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
     button('Back','preview-back','ghost',back)+button('Apply result','commit','primary'),'preview')
   pending = { base:state(), after:plan.after, label:plan.label }
 }
@@ -808,7 +828,7 @@ function targetMap(name) {
   ensure(targets.size,'No spaces are available for this target.')
   modal(clean(spec.label),renderMap(workBoard(),targets),button('Back to action','action-back','ghost'),'target-map',{name,targets})
 }
-function actionDialog(choice = null, guidance = null, battles = []) {
+function actionDialog(choice = null, guidance = null) {
   const game = state()
   const faction = activeFaction(game)
   const options = actionOptions(game)
@@ -858,7 +878,7 @@ function actionDialog(choice = null, guidance = null, battles = []) {
     : spec ? operationMarkup(spec,input,command,feat)
     : option === 'pass' ? '<p>Record the Pass, adjust income, and move to the next eligible faction.</p>' : ''
   const note = option === 'event' ? eventNotes[game.current+'/'+side] : commandNotes[command]
-  modal(NAMES[faction]+' · '+ACTIONS[option],`${help}${battleCalculations(battles)}<form id="action-form" class="stack">
+  modal(NAMES[faction]+' · '+ACTIONS[option],`${help}${battleCalculations(input.recordedBattles)}<form id="action-form" class="stack">
     ${optionMarkup}${resolution}${method}${applied}${note ? ruleNotes([note]) : ''}<button type="submit" class="btn primary">Preview result ${icon('arrow')}</button></form>`,
     button('Discard draft','discard','ghost'),'action')
   save()
@@ -897,14 +917,16 @@ function actionPreview() {
   }
   ensure(option === 'pass' || input.confirmed === 'yes','Confirm the tabletop outcome before recording.')
   const dice = [...(input.recordedDice || input.guide?.dice || [])]
+  const battles = option === 'event' ? input.recordedBattles : undefined
   const plan = preview(option === 'pass' ? game : workBoard(),label,description,after => {
     const overrides = option === 'event' ? eventOverrides(input,faction,game.current) : {}
     if (option === 'event' && game.current === 43 && !after.omens) after.omens = {holder:faction,head:null}
     if (option === 'event' && [73,76].includes(game.current)) after.markers[game.current] = {type:'capability',side:'unshaded'}
     if (input.guide?.rng && !input.recordedDice) after.rng = input.guide.rng
     const detail = input.note?.trim() || (option === 'pass' ? '' : 'Tabletop result recorded.')
-    finishAction(after,option,description,detail,dice,overrides)
+    finishAction(after,option,description,detail,dice,overrides,battles)
   },dice)
+  plan.battles = battles
   showPreview(plan,'action')
 }
 function eventOverrides(input,faction,id) {
@@ -945,7 +967,7 @@ function battlePosition(context) {
 function battleCalculations(battles = []) {
   if (!battles.length) return ''
   const volley = (heading,strike) => {
-    const {garrison,garrisonStrike,units,hits,removed,garrisonLost,double} = strike
+    const {garrison,garrisonStrike,units,hits,removed,garrisonLost,double,absorbed} = strike
     const lines = units.map(({key,count,base,bonus,loss,modifiers}) => {
       const context = modifiers.length ? ` (${clean(modifiers.join(', '))})` : ''
       const amount = modifiers.length ? `${base}${bonus ? ' + '+bonus : ''} → ${loss}` : String(loss)
@@ -959,11 +981,12 @@ function battleCalculations(battles = []) {
     return `<div><strong>${heading} · ${hits} loss strength</strong>
       ${lines.length ? '<ul class="guide-list">'+lines.join('')+'</ul>' : ''}
       ${double ? '<p>Cavalry absorbs double losses first.</p>' : ''}
+      ${absorbed !== undefined && hits ? `<p>Loss strength absorbed · ${absorbed} of ${hits}</p>` : ''}
       <p>Removed · ${clean(losses.join(', ') || 'None')}</p></div>`
   }
   return `<details class="details battle-calculations"><summary>Battle calculations</summary>
-    ${battles.map(({name,assaults}) => `<h3>${clean(name)}</h3>${assaults.map(step => `<div class="callout small">
-      <strong>${step.phase} · ${clean(step.stronghold)}</strong>
+    ${battles.map(({name,field,assaults}) => `<h3>${clean(name)}</h3>${[...field,...assaults].map(step => `<div class="callout small">
+      <strong>${clean(step.phase)} · ${clean(step.stronghold ?? 'Field Battle')}</strong>
       ${step.skipped ? '<p>Coup de Main skips Escalade.</p>' : `<div class="assault-volleys">
         ${volley('Losses to attackers',step.attackers)}${step.defenders ? volley('Losses to defenders',step.defenders) : ''}</div>`}
       </div>`).join('')}`).join('')}</details>`
@@ -978,9 +1001,12 @@ function resumeBattle() {
       session.work.draft = result.after
       session.work.input.note = [session.work.input.note,result.detail].filter(Boolean).join(' ').slice(0,500)
       session.work.input.recordedDice = result.dice
+      if (result.battles.length) {
+        session.work.input.recordedBattles = [...(session.work.input.recordedBattles ?? []),...result.battles]
+      }
       delete session.work.input.battle
       save()
-      actionDialog(null,null,result.battles)
+      actionDialog()
       return
     }
     if (job.kind === 'sample') {
@@ -992,11 +1018,17 @@ function resumeBattle() {
     return
   }
   const {prompt} = result
+  const choiceFields = prompt.counts ? `<div class="fields">${prompt.counts.map(({label,max}) => {
+    const choices = Array.from({length:max+1},(_,n) => [n,n === max ? `All (${max})` : String(n)])
+    return field(clean(label),`<select name="omens-count">${selectOptions(choices,0)}</select>`)
+  }).join('')}</div>` : field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)
+  const continueLabel = prompt.counts ? 'Confirm Omens selection' :
+    prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'
   modal(clean(prompt.stage),`<p class="muted">${clean(prompt.name)}</p><h3>${clean(prompt.title)}</h3>
     ${battlePosition(prompt.context)}
     <form id="battle-form" class="stack">
-      ${field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)}
-      <button class="btn primary" type="submit">${prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'} ${icon('arrow')}</button>
+      ${choiceFields}
+      <button class="btn primary" type="submit">${continueLabel} ${icon('arrow')}</button>
     </form>
     ${prompt.progress.length ? ruleNotes(prompt.progress,'Battle so far') : ''}
     ${prompt.context ? ruleNotes([commandNotes.Battle]) : ''}
@@ -1129,11 +1161,12 @@ function epochPreview() {
   const guided = input.method === 'table'
   ensure(!guided || input.confirmed === 'yes','Confirm the tabletop phase before applying.')
   const dice = []
+  const upkeep = !guided && phase.endsWith(' Upkeep') ? {moves:[],notes:[]} : undefined
   const plan = preview(guided ? workBoard() : game,phase,guided ? 'Record the tabletop outcome.' : 'Apply the phase and move to the next step.',after => {
     const roll = makeRoller(after,dice)
     const annona = phase === 'Annona' && after.markers[10]?.side !== 'unshaded' ? planAnnona(after,input,roll) : {}
     const hoard = isHumanFaction(after,'c') ? Number(input.hoard || 0) : maxHoard(after)
-    const note = guided ? input.note?.trim() : epochChoices(after,phase,input) ? runEpochEconomy(after,phase,input,roll) : ''
+    const note = guided ? input.note?.trim() : epochChoices(after,phase,input) ? runEpochEconomy(after,phase,input,roll,upkeep) : ''
     const replacement = after.deckMode === 'digital' ? upcomingDigitalCard(after) : numOrNull(input.next)
     const info = {...annona,hoard,note,dice}
     info.beforeRecovery = () => {
@@ -1142,7 +1175,8 @@ function epochPreview() {
     }
     advanceEpoch(after,info,replacement)
   },dice)
-  if (phase === 'Annona' && plan.after.log.at(-1)?.detail) plan.description = plan.after.log.at(-1).detail
+  if ((phase === 'Annona' || upkeep) && plan.after.log.at(-1)?.detail) plan.description = plan.after.log.at(-1).detail
+  plan.upkeep = upkeep
   showPreview(plan,'epoch')
 }
 function editorBack() {
@@ -1514,7 +1548,8 @@ document.addEventListener('submit',event => {
     }
     if (form.id === 'battle-form') {
       const answers = session.work.input.battle.answers
-      answers.push(new FormData(form).get('answer'))
+      const input = new FormData(form)
+      answers.push(input.has('omens-count') ? input.getAll('omens-count').join(',') : input.get('answer'))
       try { resumeBattle(); save() }
       catch (error) { answers.pop(); throw error }
     }

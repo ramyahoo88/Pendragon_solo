@@ -188,7 +188,7 @@ legend{padding:0 5px;color:var(--muted);font-size:12px;font-weight:650}
 const modules = {"data":{},"cards":{},"scenarios":{},"position":{},"sequence":{},"battle":{},"commands":{},"operations":{},"grants":{},"epoch-economy":{},"events":{},"event-policy":{},"bots":{},"action-resolution":{},"session":{},"ui":{}}
 ;
 (() => {
-const VERSION = '0.3.4'
+const VERSION = '0.3.5'
 const SCHEMA = 1
 const EDITION = 'GMT Living Rules · November 2023'
 const SCENARIO = 'Barbarian Conspiracy'
@@ -891,7 +891,7 @@ Object.assign(modules["position"],{clone,sum,own,inRange,clamp,ensure,makeRoller
 })()
 ;
 (() => {
-const { EPOCHS, EPOCH_PHASES, FACTIONS, NAMES, PIVOTAL, REGIONS } = modules["data"]
+const { BY_NAME, EPOCHS, EPOCH_PHASES, FACTIONS, GROUP, NAMES, PIVOTAL, REGIONS } = modules["data"]
 const { card } = modules["cards"]
 const { makeScenarioDeck, scenarioDeckSize, scenarioInfo, validateRevealedDeck } = modules["scenarios"]
 const { addProsperity, boardTotals, changeTrack, clone, control, countStrongholds, ensure, goldAvailable, groupLabel, humanFactions, inRange, isHumanFaction, isFragmentation, isRoman, loaded, makeRoller, on, own, plunderTo, scores, setImperium, spendCivitates, spendDux, duxFunds, sum, validatePosition } = modules["position"]
@@ -927,8 +927,10 @@ function resolveOmens(state, use) {
   if (use) state.omens = { holder:null, head:faction, card:state.current }
   return use
 }
-function log(state, title, detail = '', dice = []) {
-  state.log.push({ title, detail, dice, card: state.current, epoch: state.epoch })
+function log(state, title, detail = '', dice = [], battles = []) {
+  const entry = { title, detail, dice, card: state.current, epoch: state.epoch }
+  if (battles.length) entry.battles = battles
+  state.log.push(entry)
 }
 function reveal(state,id,allowedEnd = false) {
   if (id === null && allowedEnd) {
@@ -1043,7 +1045,7 @@ function settleEntropy(state,chosen = null) {
   state.entropy = null
   log(state,'Entropy',`${NAMES[humans.find(faction => faction !== keep)]} becomes a Non-player. You continue as ${NAMES[keep]} (§8.9).`)
 }
-function finishAction(state, option, description, detail = '', dice = [], overrides = {}) {
+function finishAction(state, option, description, detail = '', dice = [], overrides = {}, battles = []) {
   const faction = turn(state)
   ensure(actionOptions(state).includes(option), 'That choice is unavailable in the current sequence slot.')
   if (option === 'pass') {
@@ -1053,7 +1055,7 @@ function finishAction(state, option, description, detail = '', dice = [], overri
   if (isPivotalCard(state.current) && option === 'event') state.pivotal[faction] = 'used'
   Object.assign(state.overrides, overrides)
   state.acts.push({ faction, option, description })
-  log(state, `${NAMES[faction]} · ${description}`, detail, dice)
+  log(state, `${NAMES[faction]} · ${description}`, detail, dice, battles)
   const done = closeCardIfDone(state)
   settleEntropy(state)
   return done
@@ -1418,6 +1420,27 @@ function advanceEpoch(state, info = {}, replacement = null) {
   }
   return state
 }
+function validBattleCalculations(battles) {
+  const text = value => typeof value === 'string' && value.length < 120
+  const strength = value => Number.isFinite(value) && value >= 0 && value <= 256
+  const volley = side => Boolean(side) && [side.garrisonStrike,side.hits].every(strength) &&
+    inRange(side.garrison,0,4) && (side.garrisonLost === undefined || inRange(side.garrisonLost,0,4)) &&
+    (side.absorbed === undefined || strength(side.absorbed)) && (side.double === undefined || typeof side.double === 'boolean') &&
+    Array.isArray(side.units) && side.units.length <= 100 && side.units.every(unit => !!unit && own(GROUP,unit.key) &&
+      inRange(unit.count,1,100) && [unit.base,unit.bonus,unit.loss].every(strength) &&
+      Array.isArray(unit.modifiers) && unit.modifiers.length <= 6 && unit.modifiers.every(text)) &&
+    Array.isArray(side.removed) && side.removed.length <= 100 && side.removed.every(text)
+  return Array.isArray(battles) && battles.length < 70 && battles.every(battle => Boolean(battle) && own(BY_NAME,battle.name) &&
+    Array.isArray(battle.field) && battle.field.length <= 4 && battle.field.every(step => !!step &&
+      ['Trap','Charge / Ambush','Melee','Harass'].includes(step.phase) && volley(step.attackers) && volley(step.defenders)) &&
+    Array.isArray(battle.assaults) && battle.assaults.length <= 2*BY_NAME[battle.name].sites.length && battle.assaults.every(step => {
+      if (!step || !BY_NAME[battle.name].sites.some(site => site.name === step.stronghold)) return false
+      if (step.phase === 'Escalade') {
+        return step.skipped === true || step.skipped === undefined && step.defenders === undefined && volley(step.attackers)
+      }
+      return step.phase === 'Storm' && step.skipped === undefined && volley(step.attackers) && volley(step.defenders)
+    }))
+}
 function validateSave(state, options) {
   validatePosition(state,options)
   ensure(inRange(state.rng,1,0xffffffff), 'The save has an invalid die state.')
@@ -1440,7 +1463,8 @@ function validateSave(state, options) {
   ensure(state.result === null || (FACTIONS.includes(state.result?.winner) && ['threshold','final'].includes(state.result.reason) && state.result.won === isHumanFaction(state,state.result.winner) && Array.isArray(state.result.rank) && state.result.rank.every(f => FACTIONS.includes(f))), 'Invalid victory result.')
   ensure(Array.isArray(state.log) && state.log.length < 1050 && state.log.every(entry => {
     return typeof entry?.title === 'string' && entry.title.length < 250 && typeof entry.detail === 'string' && entry.detail.length < 3000 &&
-      Array.isArray(entry.dice) && entry.dice.every(die => typeof die?.label === 'string' && [4,6].includes(die.sides) && inRange(die.value,1,die.sides))
+      Array.isArray(entry.dice) && entry.dice.every(die => typeof die?.label === 'string' && [4,6].includes(die.sides) && inRange(die.value,1,die.sides)) &&
+      (entry.battles === undefined || validBattleCalculations(entry.battles))
   }), 'Invalid campaign journal.')
   return state
 }
@@ -1453,7 +1477,7 @@ function preview(state, label, description, mutate, dice = []) {
   return { label, description, after, dice }
 }
 
-Object.assign(modules["sequence"],{ACTIONS,isPivotalCard,inCardOrder,turn,actionOptions,canTakeFeat,canUseOmens,resolveOmens,log,upcomingDigitalCard,startDigitalDeck,startCards,pivotalOptions,declarePivotal,advanceCard,settleEntropy,finishAction,activeFaction,annonaGroups,resolveAnnona,annonaPolicy,annonaChoices,planAnnona,maxHoard,resolveImperium,resolveVictory,resolveRevenue,resolveRecovery,advanceEpoch,validateSave,preview})
+Object.assign(modules["sequence"],{ACTIONS,isPivotalCard,inCardOrder,turn,actionOptions,canTakeFeat,canUseOmens,resolveOmens,log,upcomingDigitalCard,startDigitalDeck,startCards,pivotalOptions,declarePivotal,advanceCard,settleEntropy,finishAction,activeFaction,annonaGroups,resolveAnnona,annonaPolicy,annonaChoices,planAnnona,maxHoard,resolveImperium,resolveVictory,resolveRevenue,resolveRecovery,advanceEpoch,validBattleCalculations,validateSave,preview})
 })()
 ;
 (() => {
@@ -1596,6 +1620,16 @@ function distinctChoices(units) {
   })
 }
 function scoreLoss(units,cost) { return units.reduce((n,unit) => n+cost(unit),0) }
+function describeVolley(units,garrison,garrisonStrike,hits,describeStrike) {
+  const groups = new Map()
+  for (const unit of units) {
+    const strike = describeStrike(unit)
+    const id = [unit.key,strike.loss,...strike.modifiers].join('/')
+    if (!groups.has(id)) groups.set(id,{key:unit.key,count:0,...strike})
+    groups.get(id).count++
+  }
+  return {garrison,garrisonStrike,units:[...groups.values()],hits:hits/8}
+}
 
 function runBattle(state,config,roll,reply = null) {
   const {name,attacker,defender} = config
@@ -1605,6 +1639,7 @@ function runBattle(state,config,roll,reply = null) {
   const [attacking,defending] = battleSides(state,attacker,defender)
   const civilBattle = !isFragmentation(state) && attacking.every(briton) && defending.every(briton)
   const details = []
+  const field = []
   const assaults = []
   const bellorum = (units,lead,fortDefends = false) => {
     if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
@@ -1634,27 +1669,36 @@ function runBattle(state,config,roll,reply = null) {
     ensure(options.some(option => option.value === value), 'The Battle choice no longer matches this position.')
     return value
   }
-  const pickUnit = (stage,title,units,preferred,ask,allowNone=false) => {
+  const pickUnit = (stage,title,units,preferred,ask) => {
     const options = distinctChoices(units)
     const menu = options.map(unit => ({value:unit.id,label:labelUnit(unit)}))
-    if (allowNone) menu.push({value:'none',label:'Done with this step'})
     const picked = choose(stage,title,menu,(options.find(unit => preferred && unit.key === preferred.key && unit.gold === preferred.gold)?.id ?? 'none'),ask)
     return options.find(unit => unit.id === picked)
   }
   const omens = { field:new Set(), assault:new Set() }
-  const useOmens = (phase, eligibleUnits) => {
+  const useOmens = (phase,eligibleUnits,stronghold) => {
     const holder = state.omens?.holder
-    if (!holder || holder === attacker || !eligibleUnits.length || !humanSide(state,holder) || config.ignoreTactics) return
-    const decision = choose(phase,'Discard Omens to halve chosen Units?',[
+    if (!holder || holder === attacker || !eligibleUnits.length || !humanSide(state,holder) || !reply || config.ignoreTactics) return
+    const stage = phase === 'field' ? 'Field Battle' : 'Assault'
+    const target = stronghold ? ' at '+stronghold : ' in the Field Battle'
+    const decision = choose(stage,'Discard Omens to halve chosen Units'+target+'?',[
       {value:'skip',label:'Keep Omens'}, {value:'play',label:'Discard Omens for this fight'},
     ],'skip',true)
     if (decision !== 'play') return
-    const remaining = [...eligibleUnits]
-    for (;;) {
-      const unit = pickUnit(phase,'Choose a Unit to halve',remaining,null,true,true)
-      if (!unit) break
-      omens[phase].add(unit.id)
-      remaining.splice(remaining.indexOf(unit),1)
+    const groups = distinctChoices(eligibleUnits).map(unit =>
+      eligibleUnits.filter(other => other.key === unit.key && other.gold === unit.gold))
+    const counts = groups.map(units => ({label:labelUnit(units[0]),max:units.length}))
+    const none = counts.map(() => 0).join(',')
+    const all = counts.map(({max}) => max).join(',')
+    const answer = reply({stage,title:'Choose how many Units to halve'+target,counts,
+      options:[{value:none,label:'None'}, {value:all,label:'All'}],defaultValue:none,
+      progress:[...details],context:battleContext(),
+    })
+    const numbers = typeof answer === 'string' ? answer.split(',') : []
+    ensure(numbers.length === counts.length && numbers.every((value,i) => /^\d+$/.test(value) && Number(value) <= counts[i].max),
+      'Choose an available count of each Unit to halve.')
+    for (const [index,units] of groups.entries()) {
+      for (const unit of units.slice(0,Number(numbers[index]))) omens[phase].add(unit.id)
     }
     state.omens = null
     details.push(`Omens halves ${omens[phase].size} Units during ${phase === 'field' ? 'Field Battle' : 'Assault'}.`)
@@ -1663,11 +1707,14 @@ function runBattle(state,config,roll,reply = null) {
   const forceOf = unit => participants.includes(unit) ? participants : defenders
   const alliedStriker = (unit,survives = stillPresent) => activeSide(state,33,'unshaded') && ['cav','mil','com'].includes(unit.key) &&
     forceOf(unit).some(other => survives(other) && other.owner !== unit.owner && ['cav','mil','com'].includes(other.key))
+  const badonMilitia = unit => unit.key === 'mil' && activeSide(state,28,'unshaded') && land.sites.some(site => site?.piece === 'hill')
+  const bellorumMilitia = (unit,survives = stillPresent) => unit.key === 'mil' && activeSide(state,16,'unshaded') &&
+    forceOf(unit).some(other => survives(other) && ['cav','dxw','dsw'].includes(other.key))
+  const fensCavalry = unit => activeSide(state,46,'shaded') && unit.key === 'cav' && BY_NAME[name].terrain === 'Fens'
   const fieldUnit = (unit,survives = stillPresent) => {
     let value = unitStrength(unit)
-    if (unit.key === 'mil' && (activeSide(state,28,'unshaded') && land.sites.some(site => site?.piece === 'hill') ||
-      activeSide(state,16,'unshaded') && forceOf(unit).some(other => survives(other) && ['cav','dxw','dsw'].includes(other.key)))) value = 4
-    if (activeSide(state,46,'shaded') && unit.key === 'cav' && BY_NAME[name].terrain === 'Fens') value = 2
+    if (badonMilitia(unit) || bellorumMilitia(unit,survives)) value = 4
+    if (fensCavalry(unit)) value = 2
     if (affectedWarband(unit)) value /= 2
     return value / (omens.field.has(unit.id) ? 2 : 1)
   }
@@ -1833,9 +1880,26 @@ function runBattle(state,config,roll,reply = null) {
     const volley = fieldVolley(a,d,selector,struck)
     if (!volley) return
     const {aHits,dHits,aLoss,dLoss,weights} = volley
+    const describe = unit => ({
+      base:unitStrength(unit)/4, bonus:alliedStriker(unit) ? 0.5 : 0, loss:fieldStrike(unit)/8,
+      modifiers:[
+        badonMilitia(unit) && '#28 Mons Badonicus',
+        bellorumMilitia(unit) && '#16 Dux Bellorum',
+        alliedStriker(unit) && '#33 With the Cross on his Shoulders',
+        fensCavalry(unit) && '#46 Dubglas River',
+        affectedWarband(unit) && '#64 Devastation',
+        omens.field.has(unit.id) && '#43 Omens',
+      ].filter(Boolean),
+    })
+    const toAttackers = !config.ignoreTactics && describeVolley(dHits,0,0,aLoss,describe)
+    const toDefenders = !config.ignoreTactics && describeVolley(aHits,0,0,dLoss,describe)
     markFought([...aHits,...dHits,...(aLoss ? a : []),...(dLoss ? d : [])])
-    removeLosses(a,aLoss,'field',stage,attacking.length > 1,null,weights)
-    removeLosses(d,dLoss,'field',stage,defending.length > 1,null,weights)
+    const attackerAbsorbed = removeLosses(a,aLoss,'field',stage,attacking.length > 1,null,weights)
+    const defenderAbsorbed = removeLosses(d,dLoss,'field',stage,defending.length > 1,null,weights)
+    if (toAttackers) field.push({phase:stage,
+      attackers:{...toAttackers,absorbed:attackerAbsorbed/8,removed:a.filter(unit => unit.dead).map(labelUnit)},
+      defenders:{...toDefenders,absorbed:defenderAbsorbed/8,removed:d.filter(unit => unit.dead).map(labelUnit)},
+    })
     details.push(`${stage}: attackers take ${qty(aLoss/2)}, defenders take ${qty(dLoss/2)}.`)
   }
   function projectedFieldRemovals(withdrawn = []) {
@@ -1874,20 +1938,15 @@ function runBattle(state,config,roll,reply = null) {
   const assaultHits = (units,base = 8,garrison = 0) =>
     garrison*base + units.reduce((total,unit) => total+assaultStrike(unit,base),0)
   function describeAssaultVolley(units,base,garrison,hits) {
-    const strikes = new Map()
-    for (const unit of units) {
+    return describeVolley(units,garrison,base/8,hits,unit => {
       const bonus = assaultBonus(unit)
       const modifiers = [
         bonus ? '#33 With the Cross on his Shoulders' : null,
         affectedWarband(unit) ? '#64 Devastation' : null,
         omens.assault.has(unit.id) ? '#43 Omens' : null,
       ].filter(Boolean)
-      const loss = assaultStrike(unit,base)/8
-      const key = [unit.key,bonus,...modifiers].join('/')
-      if (!strikes.has(key)) strikes.set(key,{key:unit.key,count:0,base:base/8,bonus:bonus/8,loss,modifiers})
-      strikes.get(key).count++
-    }
-    return {garrison,garrisonStrike:base/8,units:[...strikes.values()],hits:hits/8}
+      return {base:base/8,bonus:bonus/8,loss:assaultStrike(unit,base)/8,modifiers}
+    })
   }
   const automaticCoup = config.assumeCoup && config.source === 'Event Battle' && onlySite !== undefined
   const coupPossible = (site,inside) => config.surprise && (automaticCoup || site.coupCapacity-inside.length+1 > 0)
@@ -1990,19 +2049,19 @@ function runBattle(state,config,roll,reply = null) {
   }
   if (present(participants).length && !inField(defenders).length && !config.ravage && !config.noAssault && !config.siegeOnly) {
     let left = onlySite === undefined ? sortedSites : sortedSites.filter(site => site.index === onlySite)
-    for (let attempt=0; attempt<sites.length && present(participants).length; attempt++) {
-      if (!left.length) break
+    while (left.length && present(participants).length) {
+      omens.assault.clear()
       const preferred = [...left].sort((a,b)=>insideOf(a).length-insideOf(b).length).find(site=>projectedAssault(site,insideOf(site)).captures)
       const options = [{value:'none',label:'Skip Assault'},...left.map(site => ({value:String(site.index),label:BY_NAME[name].sites[site.index].name+' · '+PIECES[site.piece]}))]
       const selected = choose('Assault','Choose a Stronghold to assault',options,preferred ? String(preferred.index) : 'none',humanSide(state,attacker) && !config.ignoreTactics)
       if (selected === 'none') break
       const site = left.find(item => item.index === Number(selected))
-      if (attempt === 0) useOmens('assault',[...present(participants),...present(defenders).filter(unit => unit.site === site.index)])
-      site.used = true
       const inside = insideOf(site)
+      const stronghold = BY_NAME[name].sites[site.index].name
+      useOmens('assault',[...present(participants),...inside],stronghold)
+      site.used = true
       const assailants = present(participants)
       markFought([...assailants,...inside])
-      const stronghold = BY_NAME[name].sites[site.index].name
       const coupLimit = site.coupCapacity-inside.length+1
       const coup = config.surprise && (automaticCoup || (config.assumeCoup ? coupLimit > 0 : roll(6,'Coup de Main · '+stronghold) <= coupLimit))
       if (config.surprise) details.push(`Coup de Main ${coup ? 'succeeds' : 'fails'} (needs ${coupLimit} or less).`)
@@ -2108,7 +2167,7 @@ function runBattle(state,config,roll,reply = null) {
   if (removedAtt.length) details.push(`Attacker losses · ${removedAtt.join(', ')}.`)
   if (removedDef.length) details.push(`Defender losses · ${removedDef.join(', ')}.`)
   return {
-    name, attacker, defender, details, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
+    name, attacker, defender, details, field, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
     prestigeChange:state.tracks.prestige-prestigeBefore, renownChange:(state.tracks[attacker] ?? 0)-renownBefore,
     defenderField:inField(defenders).length, attackerField:inField(participants).length,
     defenderStanding:present(defenders).length, attackerPlunder:present(participants).filter(unit => unit.gold).length,
@@ -2123,6 +2182,16 @@ function runBattle(state,config,roll,reply = null) {
 function battleForecast(state,config) {
   const after = clone(state)
   return runBattle(after,{...config,ignoreTactics:true},() => 6)
+}
+
+function countChoices(groups,limit) {
+  let choices = [[]]
+  for (const {max} of groups) {
+    if (choices.length*(max+1) > limit) return null
+    const counts = Array.from({length:max+1},(_,count) => count)
+    choices = choices.flatMap(choice => counts.map(count => [...choice,count]))
+  }
+  return choices.map(choice => choice.join(','))
 }
 
 function raidReactionSafe(state,config,reacting) {
@@ -2149,12 +2218,14 @@ function raidReactionSafe(state,config,reacting) {
     try {
       runBattle(after,config,sides => branch([sides,1]),prompt => {
         if (prompt.stage === 'Consequences') return prompt.defaultValue
-        const values = prompt.options.map(option => option.value)
+        const values = prompt.counts ? countChoices(prompt.counts,512-attempts) : prompt.options.map(option => option.value)
+        if (!values) throw new BattleChoice({choices:null})
         return branch([prompt.defaultValue,...values.filter(value => value !== prompt.defaultValue)])
       })
       if (remaining(after) < (reacting === 'd' ? start : 1)) return false
     } catch (error) {
       if (!(error instanceof BattleChoice)) throw error
+      if (!error.prompt.choices) return false
       for (const choice of error.prompt.choices.reverse()) paths.push([...path,choice])
     }
     // Decline if a large position cannot be shown safe within the preview budget.
@@ -3135,6 +3206,8 @@ const check = (key,label) => ({key,label,type:'check',default:false})
 const countField = (key,label,defaultValue = '0') => ({key,label,type:'number',min:0,max:30,default:defaultValue})
 const spaceOption = names => names.map(name => [name,name])
 const selected = value => value === true || ['yes','on','1','true'].includes(value)
+const timedBattleFeat = feat => feat === 'Requisition' || feat === 'Entreat'
+const defaultBattleFeatTiming = (feat,input) => feat === 'Entreat' || selected(input.featBefore) ? 'before' : 'after'
 const humanHas = (state,faction) => humanFactions(state).includes(faction)
 const hasSide = (state,id,side) => state.markers[id]?.side === side
 const niallBox = 'niall-box'
@@ -3252,13 +3325,13 @@ function militaryFields(state,faction,command,feat,options,input = {}) {
     const base = [pick('space','Battle space',spaceOption(names)),pick('enemy','Defender',enemies.map(key => [key,NAMES[key]]),false),
       ...(['Retaliate','Surprise','Ravage','Ransom'].includes(feat) ? [check('tactic','Use '+feat+' here')] : [])]
     const controls = feat === 'Reinforce' && !isFragmentation(state) ? [check('alliedConsent','Dux agrees to Reinforce')] : []
-    if (feat === 'Requisition') {
+    if (timedBattleFeat(feat)) {
       const targets = Math.max(1,Math.min(cap,Number(input.rows) || 1))
       const between = Array.from({length:targets-1},(_,i) => [String(i+1),'After Battle '+(i+1)])
       controls.push({
-        key:'featTiming',label:'When to Requisition',type:'select',
+        key:'featTiming',label:'When to '+feat,type:'select',
         options:[['before','Before the first Battle'],...between,['after','After the last Battle']],
-        default:selected(input.featBefore) ? 'before' : 'after',
+        default:defaultBattleFeatTiming(feat,input),
       })
     }
     return {
@@ -3334,11 +3407,11 @@ function runMilitary(state,spec,roll,fight,reply) {
   const notes = []
   const support = (featInput=input,timing='') => {
     const note = runCommandFeat(state,{faction,command,feat,options,rows:featRows,input:featInput,battleSpaces:names},roll)
-    if (note) notes.push(timing ? `Requisition ${timing}. ${note}.` : note)
+    if (note) notes.push(timing ? `${feat} ${timing}. ${note}.` : note)
   }
   if (command === 'Battle' || command === 'Intercept') {
     if (['Surprise','Retaliate'].includes(feat)) ensure(new Set(rows.filter(row => selected(row.tactic)).map(row => row.space)).size <= 1,feat+' applies in a single space.')
-    if (['Pillage','Reinforce','Entreat'].includes(feat) && (!options.reinforceBonus || featRows.length)) support()
+    if (['Pillage','Reinforce'].includes(feat) && (!options.reinforceBonus || featRows.length)) support()
     if (command === 'Intercept') {
       const origins = [...new Set(rows.map(row => row.origin).filter(Boolean))]
       const payment = commandEconomy(state,faction,options,input)
@@ -3372,12 +3445,12 @@ function runMilitary(state,spec,roll,fight,reply) {
       }
     }
     const tacticalSpace = rows.find(row => selected(row.tactic))?.space ?? names[0]
-    let requisitionAt = null
-    if (feat === 'Requisition') {
-      const timing = input.featTiming || (selected(input.featBefore) ? 'before' : 'after')
-      requisitionAt = timing === 'before' ? 0 : timing === 'after' ? names.length : Number(timing)
-      ensure(inRange(requisitionAt,0,names.length),'Choose when to Requisition during the selected Battles.')
-      if (requisitionAt === 0) support(input,'before the first Battle')
+    let featAt = null
+    if (timedBattleFeat(feat)) {
+      const timing = input.featTiming || defaultBattleFeatTiming(feat,input)
+      featAt = timing === 'before' ? 0 : timing === 'after' ? names.length : Number(timing)
+      ensure(inRange(featAt,0,names.length),'Choose when to '+feat+' during the selected Battles.')
+      if (featAt === 0) support(input,'before the first Battle')
     }
     for (const [index,name] of names.entries()) {
       const row = rows.find(item => item.space === name)
@@ -3390,7 +3463,7 @@ function runMilitary(state,spec,roll,fight,reply) {
         shieldWall:feat === 'Shield Wall',retaliate,
         ravage:feat === 'Ravage' && selected(row.tactic),
         afterPlunder:feat === 'Ransom' && selected(row.tactic) ? () => { const note = applyRansom(state,name,roll,reply); if (note) notes.push(note.trim()) } : undefined})
-      if (requisitionAt === index+1) support(input,index+1 === names.length ? 'after the last Battle' : 'after the Battle in '+name)
+      if (featAt === index+1) support(input,index+1 === names.length ? 'after the last Battle' : 'after the Battle in '+name)
     }
     return notes.join(' ')
   }
@@ -3752,6 +3825,16 @@ const epochEconomy = (() => {
 
   function randomIndex(length,roll,label) {
     if (length === 1) return 0
+    if (length > 6) {
+      let range = 6
+      while (range < length) range *= 6
+      let index
+      do {
+        index = 0
+        for (let places = range; places > 1; places /= 6) index = index*6 + roll(6,label)-1
+      } while (index >= length)
+      return index
+    }
     const sides = length > 4 ? 6 : 4
     let value
     do { value = roll(sides,label) } while (value > length)
@@ -3826,11 +3909,12 @@ const epochEconomy = (() => {
     space.units[key][0]--
     if (hadPlunder) space.units[key][1]--
   }
-  function relocateUnits(state,from,to,key,count) {
+  function relocateUnits(state,from,to,key,count,report) {
     if (!count || from===to) return
     const space = state.land[from]
     const carry = Math.max(0,count - (on(space,key) - loaded(space,key)))
     moveUnits(state,from,to,key,count,carry)
+    report?.moves.push({from,to,key,count})
   }
   function selectRoster(state,keys,count,roll,label,priority = keys,exact = {}) {
     const eligible = names.flatMap(name => keys.flatMap(key => {
@@ -3900,7 +3984,7 @@ const epochEconomy = (() => {
   function allocation(input,prefix) {
     return Object.fromEntries(Object.entries(input).filter(([key])=>key.startsWith(prefix)).map(([key,value])=>[key.slice(prefix.length),value]))
   }
-  function houseAssign(state,key,destinations,faction,input,roll,desc) {
+  function houseAssign(state,key,destinations,faction,input,roll,desc,report) {
     if (!destinations.length) return
     const total = troopsOnMap(state,key)
     if (!total) return
@@ -3920,17 +4004,82 @@ const epochEconomy = (() => {
         counts[choice]++
       }
     }
+    applyQuarters(state,key,counts,report)
+  }
+  function applyQuarters(state,key,counts,report) {
+    const destinations = Object.entries(counts)
     for (const from of names) {
       const source = state.land[from]
       let excess = on(source,key) - (counts[from] ?? 0)
       if (excess < 1) continue
-      for (const to of destinations) {
+      for (const [to,count] of destinations) {
         const target = state.land[to]
-        const moving = Math.min(excess,counts[to]-on(target,key))
+        const moving = Math.min(excess,count-on(target,key))
         if (moving < 1) continue
-        relocateUnits(state,from,to,key,moving)
+        relocateUnits(state,from,to,key,moving,report)
         excess -= moving
       }
+    }
+  }
+  function civFoederatiQuarters(state,settlements,roll,report) {
+    const keys = ['cxw','csw']
+    const [saxons,scotti] = keys.map(key => settlements[key].length ? troopsOnMap(state,key) : 0)
+    if (!saxons && !scotti) return
+
+    const spaces = names.filter(name => (saxons && settlements.cxw.includes(name)) || (scotti && settlements.csw.includes(name)))
+    const draft = {...state,land:Object.fromEntries(spaces.map(name => [name,clone(state.land[name])]))}
+    const allocations = spaces.map(name => {
+      const maxSaxons = settlements.cxw.includes(name) ? saxons : 0
+      const maxScotti = settlements.csw.includes(name) ? scotti : 0
+      const options = []
+      for (let x = 0; x <= maxSaxons; x++) {
+        draft.land[name].units.cxw[0] = x
+        for (let s = 0; s <= maxScotti; s++) {
+          draft.land[name].units.csw[0] = s
+          const owner = control(draft,name)
+          options.push({x,s,pop:owner === 'b' || owner === 'c' ? draft.land[name].pop : 0})
+        }
+      }
+      return options
+    })
+    // The nationalities can share a Settlement Region's Control. Score the remaining
+    // Regions jointly so neither nationality overfills a Region the other could hold.
+    const memo = spaces.map(() => new Map())
+    function bestPopulation(index,x,s) {
+      if (index === spaces.length) return x || s ? -Infinity : 0
+      const key = x*(scotti+1)+s
+      const cache = memo[index]
+      if (cache.has(key)) return cache.get(key)
+      let best = -Infinity
+      for (const option of allocations[index]) {
+        if (option.x <= x && option.s <= s) {
+          best = Math.max(best,option.pop+bestPopulation(index+1,x-option.x,s-option.s))
+        }
+      }
+      cache.set(key,best)
+      return best
+    }
+    const counts = {cxw:{},csw:{}}
+    let x = saxons
+    let s = scotti
+    for (const [index,name] of spaces.entries()) {
+      const best = bestPopulation(index,x,s)
+      const tied = allocations[index].filter(option => option.x <= x && option.s <= s &&
+        option.pop+bestPopulation(index+1,x-option.x,s-option.s) === best)
+      const selected = tied[randomIndex(tied.length,roll,'Civitates Foederati quarters · '+name)]
+      if (saxons && settlements.cxw.includes(name)) counts.cxw[name] = selected.x
+      if (scotti && settlements.csw.includes(name)) counts.csw[name] = selected.s
+      x -= selected.x
+      s -= selected.s
+    }
+
+    const before = report && boardTotals(state).pop.c
+    const moveCount = report?.moves.length
+    for (const key of keys) applyQuarters(state,key,counts[key],report)
+    if (report) {
+      const after = boardTotals(state).pop.c
+      report.notes.push(`Best legal Foederati quarters: Briton-controlled Population ${before} → ${after}.`)
+      if (report.moves.length === moveCount) report.notes.push('The current Foederati quarters already attain that maximum.')
     }
   }
   function nearest(origin,destinations) {
@@ -3967,21 +4116,26 @@ const epochEconomy = (() => {
     }
     return randomSpace(possible,roll,NAMES[faction]+' redeployment')
   }
-  function combineOrDisband(state,key,from,destinations,faction,input,roll,disband) {
+  function combineOrDisband(state,key,from,destinations,faction,input,roll,disband,report) {
     const space = state.land[from]
     if (!on(space,key) || destinations.includes(from)) return
     if (!destinations.length) {
-      if (disband) space.units[key] = [0,0]
+      if (disband) {
+        report?.moves.push({from,to:'Available',key,count:on(space,key)})
+        space.units[key] = [0,0]
+      }
       return
     }
     const where = chooseQuarters(state,from,key,destinations,faction,input,roll)
-    relocateUnits(state,from,where,key,on(space,key))
+    relocateUnits(state,from,where,key,on(space,key),report)
   }
-  function releaseFoederati(state,employer,nation) {
+  function releaseFoederati(state,employer,nation,report) {
     const key = employer+nation+'w'
     for (const name of names) {
       const space = state.land[name]
-      space.units[nation+'w'][0] += on(space,key)
+      const count = on(space,key)
+      if (count) report?.notes.push(`${name} · ${count} ${groupLabel(key)} become independent because their matching Settlements are gone.`)
+      space.units[nation+'w'][0] += count
       space.units[nation+'w'][1] += loaded(space,key)
       space.units[key] = [0,0]
     }
@@ -4024,7 +4178,7 @@ const epochEconomy = (() => {
           ...['x','s'].flatMap(nation=>houseFields(state,'d'+nation+'w',siteNames(siteList(state,nation+'s','d'))))] : [])],
     }
   }
-  function duxUpkeep(state,input,roll) {
+  function duxUpkeep(state,input,roll,report) {
     const gold = clearPlunder(state,['cav',...redFoederati],'red')
     const forts = siteList(state,'fort')
     const discount = marker(state,67,'shaded') ? 2 : 1
@@ -4044,11 +4198,12 @@ const epochEconomy = (() => {
       else state.roads = false
       roadLine = maintain ? ' Roads maintained for 10.' : ' Roads were abandoned.'
     }
-    houseAssign(state,'cav',siteNames(kept),'d',input,roll,'Cavalry quarters')
+    if (!kept.length && troopsOnMap(state,'cav')) report?.notes.push('Cavalry stay in place because no maintained Fort remains.')
+    houseAssign(state,'cav',siteNames(kept),'d',input,roll,'Cavalry quarters',report)
     for (const nation of ['x','s']) {
       const towns = siteNames(siteList(state,nation+'s','d'))
-      if (towns.length) houseAssign(state,'d'+nation+'w',towns,'d',input,roll,'Dux Foederati quarters')
-      else releaseFoederati(state,'d',nation)
+      if (towns.length) houseAssign(state,'d'+nation+'w',towns,'d',input,roll,'Dux Foederati quarters',report)
+      else releaseFoederati(state,'d',nation,report)
     }
     const fractions = {rm:[1,1],rc:[2,3],am:[1,2],ac:[1,2],f:[1,1]}
     const [numerator,denominator] = fractions[state.imperium]
@@ -4086,7 +4241,7 @@ const epochEconomy = (() => {
     }
     return {help:'Stow Civitates Plunder, thin Militia, pay Comitates, discard Refugees, and redeploy. Active Upkeep capabilities are included.',fields}
   }
-  function civUpkeep(state,input,roll) {
+  function civUpkeep(state,input,roll,report) {
     const gold = clearPlunder(state,['mil','com',...blueFoederati],'wealth')
     let lines = ''
     if (marker(state,27,'unshaded')) {
@@ -4126,20 +4281,31 @@ const epochEconomy = (() => {
     state.tracks.refugees = Math.floor(state.tracks.refugees/2)
     const strongholds = civSites(state)
     for (const key of ['mil','com']) {
-      for (const from of names) combineOrDisband(state,key,from,strongholds,'c',input,roll,false)
+      for (const from of names) combineOrDisband(state,key,from,strongholds,'c',input,roll,false,report)
     }
+    if (!strongholds.length && (troopsOnMap(state,'mil') || troopsOnMap(state,'com'))) {
+      report?.notes.push('Militia and Comitates stay in place because no Town or Hillfort remains.')
+    }
+    const settlements = {}
     for (const nation of ['x','s']) {
-      const settlements = siteNames(siteList(state,nation+'s','c'))
       const key = 'c'+nation+'w'
-      if (!settlements.length) {
-        releaseFoederati(state,'c',nation)
-      } else if (human(state,'c') && settlements.some(name=>hasInput(input,`quarters-${key}-${name}`))) {
-        houseAssign(state,key,settlements,'c',input,roll,'Civitates Foederati quarters')
-      } else {
+      settlements[key] = siteNames(siteList(state,nation+'s','c'))
+      if (!settlements[key].length) releaseFoederati(state,'c',nation,report)
+    }
+    if (!human(state,'c')) {
+      civFoederatiQuarters(state,settlements,roll,report)
+    } else {
+      for (const key of blueFoederati) {
+        const destinations = settlements[key]
+        if (!destinations.length) continue
+        if (destinations.some(name=>hasInput(input,`quarters-${key}-${name}`))) {
+          houseAssign(state,key,destinations,'c',input,roll,'Civitates Foederati quarters',report)
+          continue
+        }
         for (const from of boxesWith(state,[key])) {
-          if (settlements.includes(from)) continue
-          const where = chooseQuarters(state,from,key,settlements,'c',input,roll,false)
-          relocateUnits(state,from,where,key,on(state.land[from],key))
+          if (destinations.includes(from)) continue
+          const where = chooseQuarters(state,from,key,destinations,'c',input,roll,false)
+          relocateUnits(state,from,where,key,on(state.land[from],key),report)
         }
       }
     }
@@ -4152,7 +4318,7 @@ const epochEconomy = (() => {
       fields:human(state,faction) ? nearestFields(state,[faction+'w'],strongholds) : [],
     }
   }
-  function barbarianUpkeep(state,faction,input,roll) {
+  function barbarianUpkeep(state,faction,input,roll,report) {
     const r = faction+'r'
     const w = faction+'w'
     let raiders = 0
@@ -4168,7 +4334,7 @@ const epochEconomy = (() => {
     changeTrack(state,faction,loot)
     const settlements = siteNames(siteList(state,faction+'s'))
     const disbanded = settlements.length ? 0 : troopsOnMap(state,w)
-    for (const name of names) combineOrDisband(state,w,name,settlements,faction,input,roll,true)
+    for (const name of names) combineOrDisband(state,w,name,settlements,faction,input,roll,true,report)
     state.tracks[faction] = Math.max(faction==='x' ? 10 : 6,state.tracks[faction])
     return `${NAMES[faction]} returned ${raiders} Raiders and ${loot} Plunder. ${disbanded ? `${disbanded} Warbands disbanded.` : 'Warband redeployment complete.'} Renown ${state.tracks[faction]}.`
   }
@@ -4454,19 +4620,30 @@ const epochEconomy = (() => {
     if (faction==='c') return civUpkeepChoices(state,input)
     return faction ? barbarianUpkeepChoices(state,faction) : null
   }
-  function run(state,phase,input,roll) {
+  function run(state,phase,input,roll,report) {
     if (phase==='Epoch Event') return runEvent(state,input,roll)
-    if (phase==='Dux Upkeep') return duxUpkeep(state,input,roll)
-    if (phase==='Civitates Upkeep') return civUpkeep(state,input,roll)
     const faction = phaseFaction[phase]
-    if (faction) return barbarianUpkeep(state,faction,input,roll)
+    if (report && faction) {
+      const humanChoice = human(state,faction)
+      report.priority = {
+        d:humanChoice ? '§6.6.1. Cavalry use maintained Forts and red Foederati use matching Settlements.' :
+          '§8.8.7. The Non-player Dux spreads Cavalry evenly among maintained Forts and red Foederati evenly among matching Settlements.',
+        c:humanChoice ? '§6.6.2. Militia and Comitates use the nearest Town or Hillfort. Foederati use blue Settlements of their own Nation.' :
+          '§§6.6.2 and 8.7.7. Militia and Comitates use the nearest Town or Hillfort, choosing by Control when equidistant. Blue Foederati use matching Settlements to maximize Briton-controlled Population, with random ties.',
+        x:'§6.6.3. Saxon Warbands go to the nearest independent Saxon Stronghold or become Available if none remains.',
+        s:'§6.6.3. Scotti Warbands go to the nearest independent Scotti Stronghold or become Available if none remains.',
+      }[faction]
+    }
+    if (faction==='d') return duxUpkeep(state,input,roll,report)
+    if (faction==='c') return civUpkeep(state,input,roll,report)
+    if (faction) return barbarianUpkeep(state,faction,input,roll,report)
     throw new Error('Unknown Epoch economy phase.')
   }
   return { choices, run }
 })()
 
 const epochChoices = (state,phase,input = {}) => epochEconomy.choices(state,phase,input)
-const runEpochEconomy = (state,phase,input = {},roll) => epochEconomy.run(state,phase,input,roll)
+const runEpochEconomy = (state,phase,input = {},roll,report) => epochEconomy.run(state,phase,input,roll,report)
 
 Object.assign(modules["epoch-economy"],{epochChoices,runEpochEconomy})
 })()
@@ -8758,7 +8935,7 @@ function replayAction(state,job,answers=[]) {
       ...question,index,name:question.name ?? lastSpace,progress:[...data,...(question.progress || [])],
     })
     const answer = answers[index++]
-    ensure(question.options.some(option => option.value === answer),'A saved tactical choice is unavailable.')
+    if (!question.counts) ensure(question.options.some(option => option.value === answer),'A saved tactical choice is unavailable.')
     return answer
   }
   function finishDeepRaid(config,survivors,evaded) {
@@ -8800,7 +8977,9 @@ function replayAction(state,job,answers=[]) {
     if (config.reactionFaction) data.push(NAMES[config.reactionFaction]+' forces Battle in '+config.name+'.')
     const report = runBattle(after,config,roll,reply)
     if (report.details.length) data.push(report.name+' · '+report.details.join(' '))
-    if (report.assaults.length) battles.push({name:report.name,assaults:report.assaults})
+    if (report.field.length || report.assaults.length) {
+      battles.push({name:report.name,field:report.field,assaults:report.assaults})
+    }
     if (config.afterDeepRaid) finishDeepRaid(config,Math.max(0,report.attackingRaiderSurvivors-report.attackerPlunder),report.attackerEvaded)
     return report
   }
@@ -8872,8 +9051,8 @@ function replayAction(state,job,answers=[]) {
     if (afterRaid?.type === 'conspiratio-barbarica' || job.id === 73 && job.operation?.grant) saxonFollowUp()
     ensure(index === answers.length,'Tactical choices no longer match the saved campaign.')
     const detail = data.filter(Boolean).join(' ')
-    if (job.kind === 'action') finishAction(after,job.option,job.description,detail.slice(0,2940),dice,overrides)
-    if (job.kind === 'sample') log(after,'Sample Battle',detail.slice(0,2940),dice)
+    if (job.kind === 'action') finishAction(after,job.option,job.description,detail.slice(0,2940),dice,overrides,battles)
+    if (job.kind === 'sample') log(after,'Sample Battle',detail.slice(0,2940),dice,battles)
     return {after,dice,detail,battles}
   } catch (error) {
     if (error instanceof BattleChoice) return {prompt:error.prompt,dice}
@@ -8887,7 +9066,7 @@ Object.assign(modules["action-resolution"],{replayAction})
 (() => {
 const { BY_NAME, FACTIONS, SCHEMA, VERSION } = modules["data"]
 const { ensure, inRange, opening } = modules["position"]
-const { validateSave } = modules["sequence"]
+const { validBattleCalculations, validateSave } = modules["sequence"]
 const STORAGE_KEY = 'pendragon-solo.barbarian-conspiracy'
 const HISTORY_LIMIT = 10
 
@@ -8927,7 +9106,8 @@ function parseSave(text) {
     ensure(work && ['cards','action','epoch','edit'].includes(work.kind), 'Invalid pending operation.')
     ensure(work.input && typeof work.input === 'object' && JSON.stringify(work.input).length < 700000, 'Invalid pending inputs.')
     if (work.draft !== null) validateSave(work.draft,{ draft:true })
-    const { editor, guide, battle } = work.input
+    const { editor, guide, battle, recordedBattles } = work.input
+    if (recordedBattles !== undefined) ensure(work.kind === 'action' && validBattleCalculations(recordedBattles),'Invalid staged Battle calculations.')
     if (battle !== undefined) {
       const { job, answers } = battle
       ensure(job && ['action','sample','staged'].includes(job.kind) && typeof job.label === 'string' &&
@@ -9337,7 +9517,7 @@ function journalList(entries) {
   if (!entries.length) return '<p class="muted">No journal entries match these filters.</p>'
   return `<ul class="journal">${entries.map(entry => `<li><header><strong>${clean(entry.title)}</strong>
     <small class="muted">${entry.card ? '#'+clean(entry.card)+' · ' : ''}${entry.epoch ? 'Epoch '+clean(entry.epoch) : 'Before Epoch 1'}</small></header>
-    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
+    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${battleCalculations(entry.battles)}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
 }
 function journal(game) {
   if (!game.log.length) return panel('Campaign journal','<p class="muted">Card reveals, actions and Epoch results will appear here.</p>')
@@ -9499,11 +9679,31 @@ function botDecisionMarkup(decision,dice = []) {
   const rolled = dice.length ? ' The recorded rolls below include any random ties.' : ''
   return `<div class="callout small"><strong>Why this action</strong><p>${clean(decision.rule)} · ${clean(decision.detail)}${rolled}</p></div>`
 }
+function upkeepAllocations(report,before,after) {
+  if (!report?.priority) return ''
+  const moved = new Set(report.moves.flatMap(({from,to}) => [from,to]))
+  const rows = REGIONS.flatMap(({name}) => {
+    const a = control(before,name)
+    const b = control(after,name)
+    return a !== b || moved.has(name) ? [{name,a,b}] : []
+  })
+  const owner = id => id === 'b' ? 'Britons' : NAMES[id] ?? 'Uncontrolled'
+  const moves = report.moves.map(({from,to,key,count}) => `<li>${clean(from)} → ${clean(to)} · ${count} × ${clean(groupLabel(key))}</li>`)
+  return `<section class="callout small"><h3>Upkeep allocations</h3><p>${clean(report.priority)}</p>
+    ${moves.length ? `<ul class="guide-list">${moves.join('')}</ul>` : '<p>No Troops changed quarters.</p>'}
+    ${report.notes.map(note => `<p>${clean(note)}</p>`).join('')}
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Region</th><th>Control before</th><th>Control after</th></tr></thead>
+      <tbody>${rows.map(({name,a,b}) => `<tr><td>${clean(name)}</td><td>${clean(owner(a))}</td><td>${clean(owner(b))}</td></tr>`).join('')}</tbody></table></div>` :
+      '<p>Control stays the same in every space.</p>'}
+    </section>`
+}
 function showPreview(plan,back) {
   const endsGame = plan.after.result && !state().result
   const victory = endsGame ? `<section class="callout warm"><h3>${clean(victoryTitle(plan.after))}</h3>${victoryDetails(plan.after)}</section>`
     : plan.label === 'Victory' ? `<p class="muted">The campaign continues to ${clean(plan.after.epochPhase)}.</p>${victoryTable(plan.after)}` : ''
-  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}${diffList(state(),plan.after,Boolean(victory))}${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
+  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}
+    ${upkeepAllocations(plan.upkeep,state(),plan.after)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
+    ${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
     button('Back','preview-back','ghost',back)+button('Apply result','commit','primary'),'preview')
   pending = { base:state(), after:plan.after, label:plan.label }
 }
@@ -9772,7 +9972,7 @@ function targetMap(name) {
   ensure(targets.size,'No spaces are available for this target.')
   modal(clean(spec.label),renderMap(workBoard(),targets),button('Back to action','action-back','ghost'),'target-map',{name,targets})
 }
-function actionDialog(choice = null, guidance = null, battles = []) {
+function actionDialog(choice = null, guidance = null) {
   const game = state()
   const faction = activeFaction(game)
   const options = actionOptions(game)
@@ -9822,7 +10022,7 @@ function actionDialog(choice = null, guidance = null, battles = []) {
     : spec ? operationMarkup(spec,input,command,feat)
     : option === 'pass' ? '<p>Record the Pass, adjust income, and move to the next eligible faction.</p>' : ''
   const note = option === 'event' ? eventNotes[game.current+'/'+side] : commandNotes[command]
-  modal(NAMES[faction]+' · '+ACTIONS[option],`${help}${battleCalculations(battles)}<form id="action-form" class="stack">
+  modal(NAMES[faction]+' · '+ACTIONS[option],`${help}${battleCalculations(input.recordedBattles)}<form id="action-form" class="stack">
     ${optionMarkup}${resolution}${method}${applied}${note ? ruleNotes([note]) : ''}<button type="submit" class="btn primary">Preview result ${icon('arrow')}</button></form>`,
     button('Discard draft','discard','ghost'),'action')
   save()
@@ -9861,14 +10061,16 @@ function actionPreview() {
   }
   ensure(option === 'pass' || input.confirmed === 'yes','Confirm the tabletop outcome before recording.')
   const dice = [...(input.recordedDice || input.guide?.dice || [])]
+  const battles = option === 'event' ? input.recordedBattles : undefined
   const plan = preview(option === 'pass' ? game : workBoard(),label,description,after => {
     const overrides = option === 'event' ? eventOverrides(input,faction,game.current) : {}
     if (option === 'event' && game.current === 43 && !after.omens) after.omens = {holder:faction,head:null}
     if (option === 'event' && [73,76].includes(game.current)) after.markers[game.current] = {type:'capability',side:'unshaded'}
     if (input.guide?.rng && !input.recordedDice) after.rng = input.guide.rng
     const detail = input.note?.trim() || (option === 'pass' ? '' : 'Tabletop result recorded.')
-    finishAction(after,option,description,detail,dice,overrides)
+    finishAction(after,option,description,detail,dice,overrides,battles)
   },dice)
+  plan.battles = battles
   showPreview(plan,'action')
 }
 function eventOverrides(input,faction,id) {
@@ -9909,7 +10111,7 @@ function battlePosition(context) {
 function battleCalculations(battles = []) {
   if (!battles.length) return ''
   const volley = (heading,strike) => {
-    const {garrison,garrisonStrike,units,hits,removed,garrisonLost,double} = strike
+    const {garrison,garrisonStrike,units,hits,removed,garrisonLost,double,absorbed} = strike
     const lines = units.map(({key,count,base,bonus,loss,modifiers}) => {
       const context = modifiers.length ? ` (${clean(modifiers.join(', '))})` : ''
       const amount = modifiers.length ? `${base}${bonus ? ' + '+bonus : ''} → ${loss}` : String(loss)
@@ -9923,11 +10125,12 @@ function battleCalculations(battles = []) {
     return `<div><strong>${heading} · ${hits} loss strength</strong>
       ${lines.length ? '<ul class="guide-list">'+lines.join('')+'</ul>' : ''}
       ${double ? '<p>Cavalry absorbs double losses first.</p>' : ''}
+      ${absorbed !== undefined && hits ? `<p>Loss strength absorbed · ${absorbed} of ${hits}</p>` : ''}
       <p>Removed · ${clean(losses.join(', ') || 'None')}</p></div>`
   }
   return `<details class="details battle-calculations"><summary>Battle calculations</summary>
-    ${battles.map(({name,assaults}) => `<h3>${clean(name)}</h3>${assaults.map(step => `<div class="callout small">
-      <strong>${step.phase} · ${clean(step.stronghold)}</strong>
+    ${battles.map(({name,field,assaults}) => `<h3>${clean(name)}</h3>${[...field,...assaults].map(step => `<div class="callout small">
+      <strong>${clean(step.phase)} · ${clean(step.stronghold ?? 'Field Battle')}</strong>
       ${step.skipped ? '<p>Coup de Main skips Escalade.</p>' : `<div class="assault-volleys">
         ${volley('Losses to attackers',step.attackers)}${step.defenders ? volley('Losses to defenders',step.defenders) : ''}</div>`}
       </div>`).join('')}`).join('')}</details>`
@@ -9942,9 +10145,12 @@ function resumeBattle() {
       session.work.draft = result.after
       session.work.input.note = [session.work.input.note,result.detail].filter(Boolean).join(' ').slice(0,500)
       session.work.input.recordedDice = result.dice
+      if (result.battles.length) {
+        session.work.input.recordedBattles = [...(session.work.input.recordedBattles ?? []),...result.battles]
+      }
       delete session.work.input.battle
       save()
-      actionDialog(null,null,result.battles)
+      actionDialog()
       return
     }
     if (job.kind === 'sample') {
@@ -9956,11 +10162,17 @@ function resumeBattle() {
     return
   }
   const {prompt} = result
+  const choiceFields = prompt.counts ? `<div class="fields">${prompt.counts.map(({label,max}) => {
+    const choices = Array.from({length:max+1},(_,n) => [n,n === max ? `All (${max})` : String(n)])
+    return field(clean(label),`<select name="omens-count">${selectOptions(choices,0)}</select>`)
+  }).join('')}</div>` : field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)
+  const continueLabel = prompt.counts ? 'Confirm Omens selection' :
+    prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'
   modal(clean(prompt.stage),`<p class="muted">${clean(prompt.name)}</p><h3>${clean(prompt.title)}</h3>
     ${battlePosition(prompt.context)}
     <form id="battle-form" class="stack">
-      ${field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)}
-      <button class="btn primary" type="submit">${prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'} ${icon('arrow')}</button>
+      ${choiceFields}
+      <button class="btn primary" type="submit">${continueLabel} ${icon('arrow')}</button>
     </form>
     ${prompt.progress.length ? ruleNotes(prompt.progress,'Battle so far') : ''}
     ${prompt.context ? ruleNotes([commandNotes.Battle]) : ''}
@@ -10093,11 +10305,12 @@ function epochPreview() {
   const guided = input.method === 'table'
   ensure(!guided || input.confirmed === 'yes','Confirm the tabletop phase before applying.')
   const dice = []
+  const upkeep = !guided && phase.endsWith(' Upkeep') ? {moves:[],notes:[]} : undefined
   const plan = preview(guided ? workBoard() : game,phase,guided ? 'Record the tabletop outcome.' : 'Apply the phase and move to the next step.',after => {
     const roll = makeRoller(after,dice)
     const annona = phase === 'Annona' && after.markers[10]?.side !== 'unshaded' ? planAnnona(after,input,roll) : {}
     const hoard = isHumanFaction(after,'c') ? Number(input.hoard || 0) : maxHoard(after)
-    const note = guided ? input.note?.trim() : epochChoices(after,phase,input) ? runEpochEconomy(after,phase,input,roll) : ''
+    const note = guided ? input.note?.trim() : epochChoices(after,phase,input) ? runEpochEconomy(after,phase,input,roll,upkeep) : ''
     const replacement = after.deckMode === 'digital' ? upcomingDigitalCard(after) : numOrNull(input.next)
     const info = {...annona,hoard,note,dice}
     info.beforeRecovery = () => {
@@ -10106,7 +10319,8 @@ function epochPreview() {
     }
     advanceEpoch(after,info,replacement)
   },dice)
-  if (phase === 'Annona' && plan.after.log.at(-1)?.detail) plan.description = plan.after.log.at(-1).detail
+  if ((phase === 'Annona' || upkeep) && plan.after.log.at(-1)?.detail) plan.description = plan.after.log.at(-1).detail
+  plan.upkeep = upkeep
   showPreview(plan,'epoch')
 }
 function editorBack() {
@@ -10478,7 +10692,8 @@ document.addEventListener('submit',event => {
     }
     if (form.id === 'battle-form') {
       const answers = session.work.input.battle.answers
-      answers.push(new FormData(form).get('answer'))
+      const input = new FormData(form)
+      answers.push(input.has('omens-count') ? input.getAll('omens-count').join(',') : input.get('answer'))
       try { resumeBattle(); save() }
       catch (error) { answers.pop(); throw error }
     }

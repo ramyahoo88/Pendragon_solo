@@ -1,6 +1,6 @@
 import { BY_NAME, FACTIONS, SCHEMA, VERSION } from './data.mjs'
 import { ensure, inRange, opening } from './position.mjs'
-import { validateSave } from './sequence.mjs'
+import { validBattleCalculations, validateSave } from './sequence.mjs'
 
 export const STORAGE_KEY = 'pendragon-solo.barbarian-conspiracy'
 export const HISTORY_LIMIT = 10
@@ -41,7 +41,8 @@ export function parseSave(text) {
     ensure(work && ['cards','action','epoch','edit'].includes(work.kind), 'Invalid pending operation.')
     ensure(work.input && typeof work.input === 'object' && JSON.stringify(work.input).length < 700000, 'Invalid pending inputs.')
     if (work.draft !== null) validateSave(work.draft,{ draft:true })
-    const { editor, guide, battle } = work.input
+    const { editor, guide, battle, recordedBattles } = work.input
+    if (recordedBattles !== undefined) ensure(work.kind === 'action' && validBattleCalculations(recordedBattles),'Invalid staged Battle calculations.')
     if (battle !== undefined) {
       const { job, answers } = battle
       ensure(job && ['action','sample','staged'].includes(job.kind) && typeof job.label === 'string' &&
