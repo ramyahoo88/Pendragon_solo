@@ -142,12 +142,13 @@ function run(settings,seed,active,counts) {
   if (!game.result) throw new Error('Campaign did not reach scoring.')
 }
 
-function sweep(active) {
+function sweep(active,freshSeeds) {
   const counts = {completed:0,botModes:{},botEvents:{},playerCommands:{},pivotals:0,tacticalChoices:0,failures:[]}
-  for (const scenario of Object.keys(SCENARIOS)) for (const seat of Object.keys(SOLO_SEATS)) {
+  for (const [scenarioIndex,scenario] of Object.keys(SCENARIOS).entries()) for (const [seatIndex,seat] of Object.keys(SOLO_SEATS).entries()) {
     for (const [i,difficulty] of DIFFICULTIES.entries()) {
       const variant = i%2 === 1
-      const seed = active ? 37171+i*89 : 97+i*17
+      const seed = freshSeeds ? (active ? 602000 : 601000)+scenarioIndex*101+seatIndex*13+i :
+        active ? 37171+i*89 : 97+i*17
       try {
         run({scenario,seat,difficulty,variant},seed,active,counts)
         counts.completed++
@@ -156,11 +157,13 @@ function sweep(active) {
       }
     }
   }
-  console.log(JSON.stringify({policy:active ? 'active' : 'pass',...counts}))
+  console.log(JSON.stringify({policy:active ? 'active' : 'pass',seeds:freshSeeds ? 'fresh' : 'baseline',...counts}))
   if (counts.failures.length) process.exitCode = 1
 }
 
-const selection = process.argv.slice(2)
-if (selection.some(value=>!['active','pass'].includes(value))) throw new Error('Use active, pass, or omit the argument to run both.')
-if (!selection.length || selection.includes('pass')) sweep(false)
-if (!selection.length || selection.includes('active')) sweep(true)
+const args = process.argv.slice(2)
+const freshSeeds = args.includes('--fresh')
+const selection = args.filter(arg => arg !== '--fresh')
+if (selection.some(value=>!['active','pass'].includes(value))) throw new Error('Use active, pass, or omit the policy to run both. Add --fresh for the distinct audit seeds.')
+if (!selection.length || selection.includes('pass')) sweep(false,freshSeeds)
+if (!selection.length || selection.includes('active')) sweep(true,freshSeeds)

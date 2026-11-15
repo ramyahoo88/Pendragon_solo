@@ -4,7 +4,8 @@ import { addProsperity, changeTrack, clone, control, ensure, friendlyControl, go
 const briton = faction => faction === 'd' || faction === 'c'
 const humanSide = (state,faction) => (state.humans ?? [state.human]).includes(faction)
 const activeSide = (state,number,side) => state.markers[number]?.side === side
-const present = units => units.filter(unit => !unit.dead && !unit.evaded)
+const stillPresent = unit => !unit.dead && !unit.evaded
+const present = units => units.filter(stillPresent)
 const inField = units => present(units).filter(unit => unit.site === null)
 const fromNation = key => GROUP[key].piece[0]
 const isBand = key => GROUP[key].piece === 'xw' || GROUP[key].piece === 'sw'
@@ -86,28 +87,39 @@ export function withdrawalCapacity(state,name,piece) {
   const ruined = region.terrain !== 'City' && totalProsperity(state.land[name]) === 0 && activeSide(state,64,'shaded')
   return ruined ? (piece === 'town' ? 2 : 1) : strongholdStats(state,name,piece).capacity
 }
-function favouredRemoval(units,room,cost,forcedFirst=null) {
-  const result = []
-  const ordered = [...units].sort(byLossPriority)
+function removalsByLoss(units,room,cost) {
   const scores = Array.from({length:room+1},() => null)
-  if (forcedFirst) {
-    if (room < cost(forcedFirst)) return result
-    room -= cost(forcedFirst)
-    result.push(forcedFirst)
-    ordered.splice(ordered.indexOf(forcedFirst),1)
-  }
   scores[0] = []
-  for (const unit of ordered) {
+  for (const unit of [...units].sort(byLossPriority)) {
     const value = cost(unit)
     if (!value || value > room) continue
     for (let j = room; j >= value; j--) {
       if (!scores[j] && scores[j-value]) scores[j] = [...scores[j-value],unit]
     }
   }
-  for (let n = room; n >= 0; n--) {
-    if (scores[n]) return [...result,...scores[n]]
+  return scores
+}
+function favouredRemoval(units,room,cost,forcedFirst=null) {
+  if (!forcedFirst) return removalsByLoss(units,room,cost).findLast(Boolean)
+  if (room < cost(forcedFirst)) return []
+  const others = units.filter(unit => unit !== forcedFirst)
+  return [forcedFirst,...removalsByLoss(others,room-cost(forcedFirst),cost).findLast(Boolean)]
+}
+function britonLossAllocations(units,budget,cost) {
+  const dux = removalsByLoss(units.filter(unit => unit.owner === 'd'),budget,cost)
+  const civitates = removalsByLoss(units.filter(unit => unit.owner === 'c'),budget,cost)
+  const allocations = []
+  let blue = budget
+  for (let red = 0; red <= budget; red++) {
+    if (!dux[red]) continue
+    // Find the largest blue loss that fits alongside this red loss.
+    while (red+blue > budget || !civitates[blue]) blue--
+    allocations.push({red,blue,units:[...dux[red],...civitates[blue]]})
   }
-  return result
+  allocations.sort((a,b) => b.red+b.blue-a.red-a.blue ||
+    Math.abs(a.red-a.blue)-Math.abs(b.red-b.blue) || b.red-a.red)
+  const maximum = allocations[0].red+allocations[0].blue
+  return allocations.filter(({red,blue}) => red+blue === maximum)
 }
 function kill(unit, state, land) {
   unit.dead = true
@@ -158,7 +170,7 @@ export function runBattle(state,config,roll,reply = null) {
   const renownBefore = state.tracks[attacker] ?? 0
   const choose = (stage,title,options,defaultValue,ask) => {
     if (!ask || !reply || options.length < 2) return defaultValue
-    const request = { stage, title, options, defaultValue, progress:[...details] }
+    const request = { stage, title, options, defaultValue, progress:[...details], context:battleContext() }
     const value = reply(request)
     ensure(options.some(option => option.value === value), 'The Battle choice no longer matches this position.')
     return value
@@ -190,30 +202,64 @@ export function runBattle(state,config,roll,reply = null) {
   }
   const affectedWarband = unit => activeSide(state,64,'unshaded') && ['xw','sw'].includes(unit.key) && !land.sites.some(site => site?.piece === fromNation(unit.key)+'s' && toOwner(site.piece,site.employer) === unit.owner)
   const forceOf = unit => participants.includes(unit) ? participants : defenders
-  const alliedStriker = unit => activeSide(state,33,'unshaded') && ['cav','mil','com'].includes(unit.key) &&
-    present(forceOf(unit)).some(other => other.owner !== unit.owner && ['cav','mil','com'].includes(other.key))
-  const fieldUnit = unit => {
+  const alliedStriker = (unit,survives = stillPresent) => activeSide(state,33,'unshaded') && ['cav','mil','com'].includes(unit.key) &&
+    forceOf(unit).some(other => survives(other) && other.owner !== unit.owner && ['cav','mil','com'].includes(other.key))
+  const fieldUnit = (unit,survives = stillPresent) => {
     let value = unitStrength(unit)
     if (unit.key === 'mil' && (activeSide(state,28,'unshaded') && land.sites.some(site => site?.piece === 'hill') ||
-      activeSide(state,16,'unshaded') && present(forceOf(unit)).some(other => ['cav','dxw','dsw'].includes(other.key)))) value = 4
+      activeSide(state,16,'unshaded') && forceOf(unit).some(other => survives(other) && ['cav','dxw','dsw'].includes(other.key)))) value = 4
     if (activeSide(state,46,'shaded') && unit.key === 'cav' && BY_NAME[name].terrain === 'Fens') value = 2
     if (affectedWarband(unit)) value /= 2
     return value / (omens.field.has(unit.id) ? 2 : 1)
   }
   // One damage unit is a quarter loss. Multiply by two again when some effects stack.
-  const strikeOf = (unit,phase) => {
-    if (phase === 'field') return fieldUnit(unit)*2+(alliedStriker(unit) ? (omens.field.has(unit.id) ? 2 : 4) : 0)
+  const strikeOf = (unit,phase,survives = stillPresent) => {
+    if (phase === 'field') return fieldUnit(unit,survives)*2+(alliedStriker(unit,survives) ? (omens.field.has(unit.id) ? 2 : 4) : 0)
     let value = 8+(alliedStriker(unit) ? 4 : 0)
     if (affectedWarband(unit)) value /= 2
     if (omens.assault.has(unit.id)) value /= 2
     return value
   }
-  const lossOf = (unit,phase) => {
-    let value = phase === 'field' ? fieldUnit(unit)*2 : 8 / (affectedWarband(unit) ? 2 : 1) / (omens.assault.has(unit.id) ? 2 : 1)
+  const lossOf = (unit,phase,survives = stillPresent) => {
+    let value = phase === 'field' ? fieldUnit(unit,survives)*2 : 8 / (affectedWarband(unit) ? 2 : 1) / (omens.assault.has(unit.id) ? 2 : 1)
     if (phase === 'field' && config.shieldWall && unit.owner === 'x' && unit.key === 'xw') value *= 2
     if (phase === 'escalade' && isRaider(unit.key)) value /= 2
     if (phase !== 'field' && braveFaction === unit.owner && participants.includes(unit) && !isRaider(unit.key)) value *= 2
     return value
+  }
+  function battleContext() {
+    const group = units => {
+      const groups = new Map()
+      for (const unit of present(units)) {
+        const strike = qty(strikeOf(unit,'field')/2)
+        const absorbs = qty(lossOf(unit,'field')/2)
+        const key = `${unit.key}/${strike}/${absorbs}`
+        if (!groups.has(key)) groups.set(key,{key:unit.key,count:0,plunder:0,withdrawn:0,strike,absorbs})
+        const line = groups.get(key)
+        line.count++
+        line.plunder += Number(unit.gold)
+        line.withdrawn += Number(unit.site !== null)
+      }
+      return [...groups.values()]
+    }
+    const modifiers = [
+      activeSide(state,7,'unshaded') && 'Cair Legion allows delayed Cavalry withdrawal',
+      activeSide(state,16,'unshaded') && 'Dux Bellorum can strengthen cooperating Militia',
+      activeSide(state,16,'shaded') && 'Dux Bellorum separates Militia and Dux pieces',
+      activeSide(state,33,'unshaded') && 'Fellowship of the Round Table increases cooperating strikes',
+      activeSide(state,46,'shaded') && BY_NAME[name].terrain === 'Fens' && 'Cavalry are halved in Fens',
+      present(participants).some(traps) && 'Eligible attackers Strike at Trap',
+      activeSide(state,64,'unshaded') && 'Devastation halves eligible native Warbands',
+      braveFaction && NAMES[braveFaction]+' assaulting Troops absorb double losses',
+      config.shieldWall && 'Shield Wall doubles Saxon Warband Field absorption',
+      config.ravage && 'Ravage prevents Saxon Evasion and Withdrawal and bars Saxon Assault',
+      config.surprise && 'Surprise allows Coup de Main',
+      config.retaliate && 'Retaliate allows Cavalry to carry captured Plunder',
+    ].filter(Boolean)
+    return {terrain:BY_NAME[name].terrain,attacking,defending,attackers:group(participants),defenders:group(defenders),modifiers,
+      holdings:sites.filter(site => !site.destroyed).map(site => ({name:BY_NAME[name].sites[site.index].name,piece:site.piece,owner:site.owner,
+        capacity:withdrawalCapacity(state,name,site.piece),garrison:site.garrison,inside:present(defenders).filter(unit => unit.site === site.index).length})),
+    }
   }
   const markFought = units => { for (const unit of units) if (unit.key === 'cav') fought.add(unit.id) }
   function removeLosses(pool,budget,phase,stage,distributed=false,first=null,weights=null) {
@@ -229,23 +275,14 @@ export function runBattle(state,config,roll,reply = null) {
       remaining = remaining.filter(unit => unit !== first)
     }
     if (distributed && remaining.some(unit => unit.owner === 'd') && remaining.some(unit => unit.owner === 'c')) {
-      // Allocate the shared Briton loss as close to half as available unit weights permit.
-      let best = null
-      for (let want = 0; want <= budget; want++) {
-        const dux = favouredRemoval(remaining.filter(unit => unit.owner === 'd'),want,cost)
-        const civ = favouredRemoval(remaining.filter(unit => unit.owner === 'c'),budget-want,cost)
-        const red = scoreLoss(dux,cost)
-        const blue = scoreLoss(civ,cost)
-        const quality = [red+blue,-Math.abs(red-blue),red]
-        if (!best || quality.some((value,i) => value > best.quality[i] && quality.slice(0,i).every((v,j) => v === best.quality[j]))) best = {quality,dux:dux,civ}
-      }
-      if (best) {
-        const red = scoreLoss(best.dux,cost)
-        const blue = scoreLoss(best.civ,cost)
-        removeLosses(remaining.filter(unit => unit.owner === 'd'),red,phase,stage,false,null,weights)
-        removeLosses(remaining.filter(unit => unit.owner === 'c'),blue,phase,stage,false,null,weights)
-        return before-budget+red+blue
-      }
+      const allocations = britonLossAllocations(remaining,budget,cost)
+      const options = allocations.map(({red,blue},index) => ({value:String(index),label:`Dux ${qty(red/2)} · Civitates ${qty(blue/2)}`}))
+      const agreed = choose(stage,'Agree how to share Briton losses',options,'0',
+        humanSide(state,'d') && humanSide(state,'c') && !config.ignoreTactics)
+      const {red,blue} = allocations[Number(agreed)]
+      removeLosses(remaining.filter(unit => unit.owner === 'd'),red,phase,stage,false,null,weights)
+      removeLosses(remaining.filter(unit => unit.owner === 'c'),blue,phase,stage,false,null,weights)
+      return before-budget+red+blue
     }
     while (budget > 0 && remaining.length) {
       const suggested = favouredRemoval(remaining,budget,cost)
@@ -316,22 +353,55 @@ export function runBattle(state,config,roll,reply = null) {
     ['Harass',unit => isRaider(unit.key)],
   ]
   const struck = new Set()
+  function fieldVolley(a,d,selector,spent,survives = stillPresent) {
+    if (!a.length || !d.length) return
+    const aHits = a.filter(unit => !spent.has(unit.id) && selector(unit))
+    const dHits = d.filter(unit => !spent.has(unit.id) && selector(unit))
+    if (!aHits.length && !dHits.length) return
+    const hits = units => units.reduce((total,unit) => total+strikeOf(unit,'field',survives),0)
+    const aLoss = hits(dHits)
+    const dLoss = hits(aHits)
+    for (const unit of [...aHits,...dHits]) spent.add(unit.id)
+    // Strikes and loss absorption use the same position for the whole step.
+    const weights = new Map([...a,...d].map(unit => [unit,lossOf(unit,'field',survives)]))
+    return {aHits,dHits,aLoss,dLoss,weights}
+  }
   function fieldStep(stage,selector) {
     const a = inField(participants)
     const d = inField(defenders)
-    if (!a.length || !d.length) return
-    const aHits = a.filter(unit => !struck.has(unit.id) && selector(unit))
-    const dHits = d.filter(unit => !struck.has(unit.id) && selector(unit))
-    if (!aHits.length && !dHits.length) return
-    const aLoss = dHits.reduce((total,unit) => total+strikeOf(unit,'field'),0)
-    const dLoss = aHits.reduce((total,unit) => total+strikeOf(unit,'field'),0)
-    for (const unit of [...aHits,...dHits]) struck.add(unit.id)
+    const volley = fieldVolley(a,d,selector,struck)
+    if (!volley) return
+    const {aHits,dHits,aLoss,dLoss,weights} = volley
     markFought([...aHits,...dHits,...(aLoss ? a : []),...(dLoss ? d : [])])
-    // Strikes and loss absorption use the same position for the whole step.
-    const weights = new Map([...a,...d].map(unit => [unit,lossOf(unit,'field')]))
     removeLosses(a,aLoss,'field',stage,attacking.length > 1,null,weights)
     removeLosses(d,dLoss,'field',stage,defending.length > 1,null,weights)
     details.push(`${stage}: attackers take ${qty(aLoss/2)}, defenders take ${qty(dLoss/2)}.`)
+  }
+  function projectedFieldRemovals(withdrawn = []) {
+    const dead = new Set()
+    const spent = new Set(struck)
+    const aField = inField(participants)
+    const dField = inField(defenders).filter(unit => !withdrawn.includes(unit))
+    const survives = unit => stillPresent(unit) && !dead.has(unit)
+    // Trap and the pre-Battle dice are already resolved when Withdrawal is offered.
+    for (const [,selector] of fieldStages.slice(1)) {
+      const a = aField.filter(survives)
+      const d = dField.filter(survives)
+      const volley = fieldVolley(a,d,selector,spent,survives)
+      if (!volley) continue
+      const cost = unit => volley.weights.get(unit)
+      const projected = (units,budget,owners) => {
+        if (!budget) return []
+        if (owners.length > 1 && units.some(unit => unit.owner === 'd') && units.some(unit => unit.owner === 'c')) {
+          return britonLossAllocations(units,budget,cost)[0].units
+        }
+        return favouredRemoval(units,budget,cost)
+      }
+      const aLosses = projected(a,volley.aLoss,attacking)
+      const dLosses = projected(d,volley.dLoss,defending)
+      for (const unit of [...aLosses,...dLosses]) dead.add(unit)
+    }
+    return aField.filter(unit => dead.has(unit)).length
   }
   if (inField(participants).length && inField(defenders).length) useOmens('field',[...present(participants),...present(defenders)])
   fieldStep(...fieldStages[0])
@@ -343,9 +413,10 @@ export function runBattle(state,config,roll,reply = null) {
   const stormHits = (site,inside) => site.garrison*8 + inside.reduce((total,unit) => total+strikeOf(unit,'storm'),0)
   const automaticCoup = config.assumeCoup && config.source === 'Event Battle' && onlySite !== undefined
   const coupPossible = (site,inside) => config.surprise && (automaticCoup || site.coupCapacity-inside.length+1 > 0)
+  const leadingCavalry = units => braveFaction === 'd' ? null : units.filter(unit => unit.key === 'cav').sort(byLossPriority)[0] ?? null
   function projectedAssault(site,inside) {
     const attacking = present(participants)
-    const double = braveFaction === 'd' ? null : attacking.find(unit=>unit.key === 'cav')
+    const double = leadingCavalry(attacking)
     const escalade = coupPossible(site,inside) ? [] : favouredRemoval(attacking,escaladeHits(site,inside),unit=>lossOf(unit,'escalade')*(unit === double ? 2 : 1),double)
     const storming = attacking.filter(unit=>!escalade.includes(unit))
     const damage = storming.reduce((total,unit)=>total+strikeOf(unit,'storm'),0)
@@ -359,10 +430,18 @@ export function runBattle(state,config,roll,reply = null) {
     const exposed = projectedAssault(site,inside)
     if (!exposed.captures) return false
     const defended = projectedAssault(site,[...inside,...group])
-    const opponents = present(participants)
-    const fieldHits = group.filter(unit=>!struck.has(unit.id)).reduce((n,unit)=>n+strikeOf(unit,'field'),0)
-    const fieldLosses = favouredRemoval(opponents,fieldHits,unit=>lossOf(unit,'field')).length
+    const fieldLosses = Math.max(0,projectedFieldRemovals()-projectedFieldRemovals(group))
     return !defended.captures || defended.losses-exposed.losses > fieldLosses
+  }
+  const consent = new Map()
+  const remainingCapacity = site => withdrawalCapacity(state,name,site.piece)-insideOf(site).length
+  function admitsAlly(site,side,stage) {
+    if (site.owner !== side && humanSide(state,site.owner) && !humanSide(state,side) && !config.ignoreTactics && !consent.has(site.index)) {
+      consent.set(site.index,choose(stage,`Admit allied ${NAMES[side]} Units at ${BY_NAME[name].sites[site.index].name}?`,[
+        {value:'yes',label:'Admit allied units'}, {value:'no',label:'Keep the space for your units'},
+      ],'yes',true))
+    }
+    return consent.get(site.index) !== 'no' || site.owner === side
   }
   function defendersWithdraw() {
     if (!present(participants).length || !sites.length) return
@@ -370,13 +449,11 @@ export function runBattle(state,config,roll,reply = null) {
       if (config.ravage && side === 'x') continue
       const factionUnits = inField(defenders).filter(unit => unit.owner === side)
       const stay = new Set()
-      const consent = new Map()
       for (const unit of factionUnits.sort(byFriendlyPiece)) {
         if (unit.site !== null || stay.has(unit.id)) continue
         if (unit.key === 'cav' && !humanSide(state,'d') && activeSide(state,7,'unshaded') && !config.forceWithdraw) continue
-        const remainingCapacity = site => withdrawalCapacity(state,name,site.piece)-insideOf(site).length
         const homeSettlement = site => isBand(unit.key) && site.piece === fromNation(unit.key)+'s' && site.owner === side
-        const holes = sortedSites.filter(site => remainingCapacity(site) > 0 && consent.get(site.index) !== 'no')
+        const holes = sortedSites.filter(site => remainingCapacity(site) > 0 && (consent.get(site.index) !== 'no' || site.owner === side))
           .sort((a,b)=>Number(homeSettlement(b))-Number(homeSettlement(a)))
         if (!holes.length) break
         const options = [{value:'field',label:'Stay in the field'},...holes.map(site => ({value:String(site.index),label:BY_NAME[name].sites[site.index].name+' · '+PIECES[site.piece]}))]
@@ -397,12 +474,7 @@ export function runBattle(state,config,roll,reply = null) {
         }
         const together = selection.startsWith('all-')
         const site = holes.find(site => site.index === Number(together ? selection.slice(4) : selection))
-        if (site.owner !== side && humanSide(state,site.owner) && !humanSide(state,side) && !config.ignoreTactics && !consent.has(site.index)) {
-          consent.set(site.index,choose('Withdrawal',`Admit allied ${NAMES[side]} Units at ${BY_NAME[name].sites[site.index].name}?`,[
-            {value:'yes',label:'Admit allied units'}, {value:'no',label:'Keep the space for your units'},
-          ],'yes',true))
-        }
-        if (consent.get(site.index) === 'no') { stay.add(unit.id); continue }
+        if (!admitsAlly(site,side,'Withdrawal')) { stay.add(unit.id); continue }
         for (const piece of together ? matching.slice(0,remainingCapacity(site)) : [unit]) piece.site = site.index
       }
     }
@@ -414,13 +486,15 @@ export function runBattle(state,config,roll,reply = null) {
   if (activeSide(state,7,'unshaded') && !config.noWithdraw) {
     for (const unit of inField(defenders).filter(unit => unit.key === 'cav')) {
       const allowed = sortedSites.filter(site => ['fort','town'].includes(site.piece) &&
-        present(defenders).filter(unit => unit.site === site.index).length < withdrawalCapacity(state,name,site.piece))
+        remainingCapacity(site) > 0 && (consent.get(site.index) !== 'no' || site.owner === unit.owner))
       const choice = choose('Charge / Ambush','Withdraw Cavalry after its Charge?',[
         {value:'field',label:'Stay in the field'},
         ...allowed.map(site => ({value:String(site.index),label:BY_NAME[name].sites[site.index].name})),
       ],allowed.length ? String(allowed[0].index) : 'field',humanSide(state,'d') && !config.ignoreTactics)
-      if (choice !== 'field') {
-        unit.site = Number(choice)
+      const site = choice === 'field' ? null : allowed.slice(allowed.findIndex(site => site.index === Number(choice)))
+        .find(site => admitsAlly(site,unit.owner,'Charge / Ambush'))
+      if (site) {
+        unit.site = site.index
         details.push('Cavalry withdraws after its Charge into '+BY_NAME[name].sites[unit.site].name+'.')
       }
     }
@@ -455,12 +529,14 @@ export function runBattle(state,config,roll,reply = null) {
       if (config.surprise) details.push(`Coup de Main ${coup ? 'succeeds' : 'fails'} (needs ${coupLimit} or less).`)
       if (!coup) {
         const hits = escaladeHits(site,inside)
-        const cavalry = braveFaction === 'd' ? null : assailants.find(unit => unit.key === 'cav')
+        const cavalry = leadingCavalry(assailants)
         const autoDouble = hits > 0 && Boolean(cavalry)
         const double = cavalry && hits && choose('Escalade','Have one Cavalry absorb double losses?',[
-          {value:'yes',label:'Absorb double loss with the first Cavalry'}, {value:'no',label:'Allocate normal losses'},
+          {value:'yes',label:'Use Cavalry to absorb double losses'}, {value:'no',label:'Allocate normal losses'},
         ],autoDouble ? 'yes' : 'no',humanSide(state,'d') && !config.ignoreTactics) === 'yes'
-        removeLosses(assailants,hits,'escalade','Escalade',attacking.length > 1,double ? cavalry : null)
+        const first = double ? pickUnit('Escalade','Choose the Cavalry that leads the Escalade',assailants.filter(unit => unit.key === 'cav'),cavalry,
+          hits >= lossOf(cavalry,'escalade')*2 && humanSide(state,'d') && !config.ignoreTactics) : null
+        removeLosses(assailants,hits,'escalade','Escalade',attacking.length > 1,first)
         details.push(`Escalade at ${BY_NAME[name].sites[site.index].name}: attackers take ${qty(hits/2)}.`)
       }
       const alive = present(participants)

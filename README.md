@@ -1,10 +1,10 @@
-# Pendragon Solo Companion v0.3.2
+# Pendragon Solo Companion v0.3.3
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
 ## Open and build
 
-Open `dist/index.html` in a browser. It contains the app, styles, fonts, and banner and makes no network requests during play. The Guide links to reference documents. Use **Saves → Export JSON** to transfer a campaign between browsers or between the offline file and hosted app. JSON saves include the original dice state and pending tactical choices.
+Open `dist/index.html` in a browser, or choose **Download offline app** from **Saves**. The HTML includes the app, styles, fonts, and banner. The Guide includes offline rule notes and links to the reference documents. Use **Saves → Export JSON** to transfer a campaign between browsers or between the offline file and hosted app. The filename identifies the scenario, solo seat, Epoch, and time. JSON saves include the original dice state and pending tactical choices. Use **Save Epoch checkpoint** before Annona or Victory to keep a position beyond the ten-step Undo history.
 
 Existing campaign saves retain their board, dice state and action history. When upgrading with an unresolved Battle, resume the action and make its tactical choices again. An unresolved bot action is planned again from the saved board.
 
@@ -12,6 +12,7 @@ Existing campaign saves retain their board, dice state and action history. When 
 node build.mjs
 node --test test/*.test.mjs
 node test/campaign-sweep.mjs
+node test/campaign-sweep.mjs --fresh
 ```
 
 Supply a second output path to verify the distributed HTML with a separate build.
@@ -23,10 +24,11 @@ cmp dist/index.html /tmp/pendragon-rebuild.html
 
 ## What to try
 
-- Choose **Try a sample Battle** from a fresh campaign for the fight at Corieltauvi. Take the Comitates into Ratae or keep it in the field, then follow the impact through the rest of the Battle. Close or reload the app mid-action to check resume and confirm the same rolls are retained.
+- Choose **Try a sample Battle** from a fresh campaign for the fight at Corieltauvi. Check the units, Plunder, and Stronghold capacity beside the Withdrawal choice. Take the Comitates into Ratae or keep it in the field, then follow the result. Close or reload the app mid-action to resume with the same rolls.
 - Choose **Try a sample opening** for Civitates on #22, with #5 showing next. Choose **Command only**, use **Trade** with zero targets to collect in every Town space, and apply. Preview the Dux Pass and then the Scotti Raid. The seeded opening drops Prosperity from 80 to 73 and adds seven Plunder after applying the Raid.
 - Start a physical-deck game as Civitates with #57 Myrddin current and #22 next. Select a revealed card's title to read its effect. Preview the Scotti action to see the Command and Feat the bot selects for Myrddin. If a Battle needs your faction's tactics, the app asks for them before showing the result.
-- Open **Saves → New game** to select a scenario, seat, difficulty, and deck. Petty Tyrants applies Entropy during setup if you select Both Britons. Use **Board** to inspect spaces, units and supplies. Use the correction controls to match an existing physical position or record a tabletop ruling.
+- Open **Saves → New game** to select a scenario, seat, difficulty, and deck. Petty Tyrants applies Entropy during setup if you select Both Britons. The map and list show faction forces and Strongholds. **Choose on map** fills a Command target from its available spaces. Use the Board correction controls to match a physical position or record a tabletop ruling.
+- Open **Victory outlook** to see current margins and requirements. At the Victory phase the preview shows whether play continues or who wins before you apply it. Non-player previews show the applicable decision rule next to their recorded rolls.
 
 ## Rules coverage
 
@@ -47,9 +49,9 @@ Under shaded #16 Dux Bellorum, Civitates-led attacks with Militia leave Dux unit
 
 ## Verification
 
-The 145 scripted tests cover the Corieltauvi Battle from the Living Rules, the seven-Raider Scotti Assault in the Playbook, multi-Stronghold Siege, major granted-action sequences, supply and scenario boundaries, both deck modes, and save replay. The release regressions cover Battle participation under #16, eligible targets under #33, the geographic scope of #73, #70 Plunder and Wealth, and Entropy at setup.
+The 161 scripted tests include three natural v0.3.2 Mistborn saves. They also check withdrawals and Cair Legion admission, Escalade cargo, shared Briton losses, Saxon Ravage, Scotti Trap, multi-origin Dux March, the Civitates Town Muster priority, and Wealth payments in Epoch Annona and shaded #10. Earlier Battle, Event, scenario, and save tests also pass.
 
-The seeded campaign sweep runs every combination of scenario, seat, and difficulty twice. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. Both use default answers for prompted tactics. The runner validates each position and stops on any bot instruction that cannot be resolved in the app. For v0.3.2 all 192 games reached scoring, with 6,289 bot turns and no printed-aid prompts. The two sweeps exercised 73 of 76 Event IDs. Targeted fixtures cover Stilicho, Aneirin and Fickle Weather.
+Each campaign sweep runs every combination of scenario, seat, and difficulty with two simple policies. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. Both policies use default tactical answers. All 192 baseline games and all 192 games with distinct audit seeds reached scoring in v0.3.3. The sweeps resolved 12,475 bot turns and exercised all 76 ordinary and Pivotal Event IDs between them.
 
 ## References
 

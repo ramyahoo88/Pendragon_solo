@@ -3,7 +3,7 @@ import { ensure, inRange, opening } from './position.mjs'
 import { validateSave } from './sequence.mjs'
 
 export const STORAGE_KEY = 'pendragon-solo.barbarian-conspiracy'
-const HISTORY_LIMIT = 10
+export const HISTORY_LIMIT = 10
 
 export const fresh = (game = opening()) => ({ game, undo: [], redo: [], work: null })
 export function push(session, label, after) {

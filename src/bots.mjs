@@ -8,7 +8,7 @@ import { grantRule, setGrantMarkers } from './grants.mjs'
 import { runCommand, runCommandFeat } from './commands.mjs'
 import { botForcesRaidBattle, raidBonusPlunder, raidResponders } from './operations.mjs'
 import { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } from './position.mjs'
-import { actionOptions, activeFaction, finishAction, pivotalOptions, resolveImperium } from './sequence.mjs'
+import { actionOptions, activeFaction, finishAction, isPivotalCard, pivotalOptions, resolveImperium } from './sequence.mjs'
 
 export function makeRoller(state, history, scripted = []) {
   let index = 0
@@ -292,11 +292,10 @@ function fixedMusterCapacity(state,name) {
 }
 function stackingGain(state,name,owner,mutate) {
   if (friendlyControl(state,name,owner)) return 0
-  const before = clone(state.land[name])
-  mutate(state.land[name])
-  const gain = friendlyControl(state,name,owner) ? state.land[name].pop : 0
-  state.land[name] = before
-  return gain
+  const space = clone(state.land[name])
+  mutate(space)
+  const projected = {...state,land:{...state.land,[name]:space}}
+  return friendlyControl(projected,name,owner) ? space.pop : 0
 }
 function civMusterCandidates(state, chosen, phase) {
   const avail = availability(state)
@@ -323,13 +322,20 @@ function civMusterCandidates(state, chosen, phase) {
     const hill = space.sites.findIndex((site,index) => site?.piece === 'hill' && (vacant >= 0 || sites[index].type === 'T'))
     const militiaOnly = on(space,'mil') >= 2 && vacant >= 0
     if (!militiaOnly && (hill < 0 || !on(space,'mil'))) return []
-    return [{name,slot:vacant >= 0 ? vacant : hill,hill:militiaOnly ? -1 : hill,rank:[+militiaOnly]}]
+    const choice = {name,slot:vacant >= 0 ? vacant : hill,hill:militiaOnly ? -1 : hill,rank:[+militiaOnly]}
+    return [{...choice,gain:stackingGain(state,name,'c',target => placeMusterTown(target,choice))}]
   })
+}
+function placeMusterTown(space,{slot,hill}) {
+  removeUnloadedFirst(space,'mil',hill < 0 ? 2 : 1)
+  if (hill >= 0) space.sites[hill] = null
+  space.sites[slot] = {piece:'town',employer:null}
 }
 function civMusterImprovesControl(state) {
   const chosen = new Set()
   if (civMusterCandidates(state,chosen,'hill').length) return true
-  return civMusterCandidates(state,chosen,'troops').some(choice => choice.rank[2] > 0)
+  return civMusterCandidates(state,chosen,'troops').some(choice => choice.rank[2] > 0) ||
+    civMusterCandidates(state,chosen,'town').some(choice => choice.gain > 0)
 }
 export function civitatesMuster(state,roll,{oneSpace = false} = {}) {
   const notes = []
@@ -354,9 +360,7 @@ export function civitatesMuster(state,roll,{oneSpace = false} = {}) {
       }
       if (phase === 'town') {
         state.tracks.wealth -= 2
-        removeUnloadedFirst(space,'mil',pick.hill < 0 ? 2 : 1)
-        if (pick.hill >= 0) space.sites[pick.hill] = null
-        space.sites[pick.slot] = {piece:'town',employer:null}
+        placeMusterTown(space,pick)
         notes.push(`${pick.name} · build one Town`)
       }
     }
@@ -547,6 +551,10 @@ function opponentRank(state,attacker,defender) {
   const edges = shieldsOf(state)
   return [Number(side.some(faction => botHasHuman(state,faction))),Math.max(...side.map(faction => edges[faction] ?? margins[faction].margin))]
 }
+function saxonBattleGoal(outcome,{count,mayEvade}) {
+  return outcome.destroyed.length > 0 ||
+    (count > 0 && !mayEvade && outcome.defenderLosses-outcome.destroyed.length >= count)
+}
 function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enemyFilter,requireDestruction = false},roll) {
   const candidates = []
   const militiaRoll = () => roll(6,'Civitates Battle · Plunder threshold')
@@ -592,19 +600,18 @@ function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enem
       }
       if (scotti) {
         const ambush = BY_NAME[name].terrain === 'Hills' && !effectiveMarker(state,56,'unshaded')
-        const trap = effectiveMarker(state,56,'shaded')
+        const trap = BY_NAME[name].terrain === 'Hills' && on(space,'sw') && effectiveMarker(state,56,'shaded')
         const coup = allowedFeat && (outcome.destroyed.length || whenFeasible({surprise:true,assumeCoup:true}).destroyed.length)
         want = ambush || trap || outcome.destroyed.length > 0 || Boolean(coup)
       }
       if (faction === 'x') {
-        const lostAll = count > 0 && outcome.defenderLosses-outcome.destroyed.length === count
         const coup = allowedFeat && whenFeasible({surprise:true,assumeCoup:true}).destroyed.length
-        want = (lostAll && !mayEvade) || outcome.destroyed.length > 0 || Boolean(coup)
+        want = saxonBattleGoal(outcome,{count,mayEvade}) || Boolean(coup)
       }
       if (!want) continue
       const [player,margin] = opponentRank(state,faction,defender)
       const rank = civ || dux ? [+civilWar,margin,player] : [player,margin]
-      targets.push({request,outcome,pureOutcome,rank,opensCivitatesBattle})
+      targets.push({request,outcome,pureOutcome,rank,opensCivitatesBattle,count,mayEvade})
     }
     if (targets.length) candidates.push(targets.sort((a,b) => precedence(a.rank,b.rank))[0])
   }
@@ -668,19 +675,40 @@ function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enem
     }
   }
   if (allowedFeat && faction === 'x') {
-    const smallerWithWall = queue.some(({request,outcome}) => battleForecast(state,{...request,shieldWall:true}).attackerLosses < outcome.attackerLosses)
+    const withWall = queue.map(({request}) => battleForecast(state,{...request,shieldWall:true}))
+    const smallerWithWall = queue.some((target,index) => {
+      const {name,defender} = target.request
+      const room = sum(defenderSides(state,'x',defender).flatMap(side =>
+        ownedStrongholds(state.land[name],side).map(site => withdrawalCapacity(state,name,site.piece))))
+      return target.count > room && withWall[index].attackerLosses < target.outcome.attackerLosses && saxonBattleGoal(withWall[index],target)
+    })
+    let keep
     if (smallerWithWall) {
       for (const request of requests) request.shieldWall = true
       feat = 'Shield Wall'
+      keep = (target,index) => saxonBattleGoal(withWall[index],target)
     } else {
-      const exposed = pickBest(queue.filter(({request}) => hasStronghold(state.land[request.name],defenderSides(state,faction,request.defender))).map(({request}) => ({
-        name:request.name,rank:[-enemyTroops(state,request.name,faction)],request,
-      })),roll,'Saxon Surprise · Battle with a Stronghold')
-      if (exposed) {
-        exposed.request.surprise = true
-        feat = 'Surprise'
+      const ravageSpaces = new Set(ravageChoices(state,requests,faction,roll,{battle:true}))
+      const ravaging = queue.filter(target => ravageSpaces.has(target.request.name) &&
+        saxonBattleGoal(battleForecast(state,{...target.request,ravage:true}),target))
+      if (ravaging.length) {
+        for (const {request} of ravaging) request.ravage = true
+        feat = 'Ravage'
+        keep = target => target.request.ravage || saxonBattleGoal(target.outcome,target)
+      } else {
+        const exposed = pickBest(queue.filter(({request}) => hasStronghold(state.land[request.name],defenderSides(state,faction,request.defender))).map(({request}) => ({
+          name:request.name,rank:[-enemyTroops(state,request.name,faction)],request,
+        })),roll,'Saxon Surprise · Battle with a Stronghold')
+        if (exposed) {
+          exposed.request.surprise = true
+          feat = 'Surprise'
+        }
+        keep = target => target.request.surprise || saxonBattleGoal(target.outcome,target)
       }
     }
+    requests.splice(0,requests.length,...queue.filter(keep).map(target => target.request))
+    if (!requests.length) return null
+    notes[0] = requests.map(request => `${request.name} against ${NAMES[request.defender]}`).join('; ')
   }
   if (allowedFeat && faction === 'c') {
     const booty = applyCivitatesPillage(state,roll)
@@ -832,17 +860,21 @@ function planBritonMarch(state,faction,roll,{oneSpace,allowedFeat,blueConsent,fr
     if (invite) {feat = 'Invite';notes.push(invite)}
   }
   const rolled = dux ? roll(4,'Dux March · space limit') : 4
-  const limit = oneSpace ? 1 : Math.min(rolled,targetLimit ?? rolled)
+  const destinationLimit = oneSpace ? 1 : Math.min(rolled,targetLimit ?? rolled)
+  const originLimit = dux && !oneSpace ? rolled : destinationLimit
   const origins = REGIONS.filter(({name}) => (dux || friendlyControl(draft,name,'c')) &&
     (dux ? duxGroups : civGroups).some(key => on(draft.land[name],key))).map(r => r.name)
   const known = new Map(origins.map(name => [name,britonReachable(draft,name,faction)]))
   const sourcesUsed = new Set()
   const destinationsUsed = new Set()
-  let strongChosen = false
+  let strongDestination = null
+  let currentDestination = null
   let seaUsed = false
   const priority = target => target.rank[target.rank.length-2]
-  for (let n = 0; targets.length && n < limit && sourcesUsed.size < limit && canSpend() >= fee;) {
-    const plans = targets.filter(target => !strongChosen || priority(target) !== 2 || targetFilter).flatMap(target => {
+  while (targets.length && sourcesUsed.size < originLimit && canSpend() >= fee) {
+    const plans = targets.flatMap(target => {
+      if (destinationsUsed.size >= destinationLimit && !destinationsUsed.has(target.name)) return []
+      if (strongDestination && target.name !== strongDestination && priority(target) === 2 && !targetFilter) return []
       const plausible = origins.filter(name => !sourcesUsed.has(name) && !destinationsUsed.has(name) && name !== target.name).flatMap(name => {
         const bySea = !known.get(name).has(target.name) && dux && !seaUsed && effectiveMarker(draft,60,'unshaded') && BY_NAME[name].seas.length && BY_NAME[target.name].seas.length
         if (!known.get(name).has(target.name) && !bySea) return []
@@ -863,19 +895,19 @@ function planBritonMarch(state,faction,roll,{oneSpace,allowedFeat,blueConsent,fr
       }
       return [{...target,plausible}]
     })
-    const target = pickBest(plans,roll,`${NAMES[faction]} March destination`)
+    const target = plans.find(plan => plan.name === currentDestination) ?? pickBest(plans,roll,`${NAMES[faction]} March destination`)
     if (!target) break
     const selected = pickBest(target.plausible.map(source => ({...source,rank:[source.count]})),roll,`${NAMES[faction]} March origin`)
-    const wasTarget = target.name
-    targets.splice(targets.findIndex(option => option.name === wasTarget),1)
-    if (priority(target) === 2) strongChosen = true
+    // Dux brings more origins to this destination until its Battle objective is met.
+    if (dux) currentDestination = target.name
+    else targets.splice(targets.findIndex(option => option.name === target.name),1)
+    if (priority(target) === 2) strongDestination = target.name
     if (dux) spendDux(draft,fee,blueConsent)
     else draft.tracks.blue -= fee
     for (const [key,count] of Object.entries(selected.groups)) shiftUnits(draft,selected.name,target.name,key,count)
     sourcesUsed.add(selected.name)
     destinationsUsed.add(target.name)
     seaUsed ||= Boolean(selected.bySea)
-    n++
     notes.push(`${selected.name} → ${target.name} · ${selected.count} Troops${selected.bySea ? ' by sea' : ''}`)
   }
   if (!sourcesUsed.size) return null
@@ -1341,7 +1373,7 @@ function ransomPayer(state,name) {
 const ransoms = (state,name,roll) => roll(6,'Ransom · '+name) + Number(effectiveMarker(state,36,'shaded')) -
   Number(effectiveMarker(state,36,'unshaded')) >= 4
 function ravageChoices(state,targets,faction,roll,{battle = false} = {}) {
-  const fertile = targets.filter(({name}) => totalProsperity(state.land[name]) > state.land[name].pop)
+  const fertile = targets.filter(({name}) => BY_NAME[name].terrain !== 'City' && totalProsperity(state.land[name]) > state.land[name].pop)
   if (battle) return fertile.filter(({name}) => {
     const space = state.land[name]
     return on(space,'xw')-loaded(space,'xw') > space.pop && !friendlyControl(state,name,'x')
@@ -1829,6 +1861,7 @@ function mistbornBriton(state,owner,roll) {
     if (owner === 'd' && !fortsIn(state,[name]) && !duxFriendly(state,name) || owner === 'c' && !native(state,name,'c')) continue
     const base = clone(state)
     const note = runCommand(base,{faction:owner,command,feat:'',options,rows:[row]},roll)
+    if (!battleTargets(base,owner).includes(name)) continue
     for (const enemy of battleEnemies(base,name,owner).filter(enemy=>barbarians.includes(enemy))) {
       const candidate = estimateEventBattle(base,owner,name,enemy,0)
       plans.push({name,base,note, ...candidate})
@@ -2069,6 +2102,10 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   const next = card(state.next)
   const eventAllowed = !choices.myrddin && actionOptions(state).includes('event') &&
     (state.current >= 73 && state.current <= 76 || !eventBlocked(current,faction))
+  const rule = {s:'8.5',x:'8.6',c:'8.7',d:'8.8'}[faction]
+  const priorityEvent = {s:'8.5.2',x:'8.6.2',c:'8.7.2',d:'8.8.2'}[faction]
+  const optionalEvent = {s:'8.5.5',x:'8.6.6',c:'8.7.5',d:'8.8.5'}[faction]
+  const explain = (plan,section,detail) => ({...plan,decision:{rule:'§'+section,detail}})
   const guide = (title, instructions, extra = {}) => ({ mode:'guide', faction, title, instructions, dice, rng:draft.rng, ...extra })
   const actionSlot = option => option === 'command' && allowance.oneSpace ? 'limited' : option === 'feat' && allowance.oneSpace ? 'limitedFeat' : option
   const auto = (option, title, detail, proposed = draft, overrides = {}) => {
@@ -2085,21 +2122,30 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const base = clone(draft)
     const chosen = policyBattleRequests(base,faction,allowance,roll)
     if (!chosen) return null
-    return battlePlan(`Battle${chosen.feat ? ' + '+chosen.feat : ''}`,chosen.requests,chosen.notes.join('. '),chosen.feat,base)
+    const plan = battlePlan(`Battle${chosen.feat ? ' + '+chosen.feat : ''}`,chosen.requests,chosen.notes.join('. '),chosen.feat,base)
+    const [section,detail] = {
+      d:['8.8.3','A Battle forecast gains Prestige.'],
+      c:['8.7.1','A Battle forecast gains Control or exceeds the Plunder roll.'],
+      x:['8.6.4','The Warbands can remove the last enemy unit or Assault.'],
+      s:['8.5.3','A Scotti Warband can Trap, attempt Ambush, or Assault.'],
+    }[faction]
+    return explain(plan,section,detail + (chosen.feat === 'Ravage' ? ' Ravage lets the Warbands carry extra Plunder.' : ''))
   }
-  const guidedEvent = plan => guide(plan.title,plan.guide,{suggested:'event'})
   const resolveEvent = () => {
     const plan = eventPlan(draft,faction,roll,allowance)
     if (!plan) return null
-    if (plan.guide) return guidedEvent(plan)
-    if (plan.player) return {mode:'player-event',faction,title:plan.label,player:plan.player,dice,rng:draft.rng}
-    if (plan.requests?.length || plan.afterRaid) {
-      return {...battlePlan(plan.label,plan.requests,plan.description,null,plan.base),option:'event',afterRaid:plan.afterRaid,overrides:plan.overrides}
-    }
-    return auto(plan.option,plan.label,plan.description,plan.base ?? draft,plan.overrides)
+    let result
+    if (plan.guide) result = guide(plan.title,plan.guide,{suggested:'event'})
+    else if (plan.player) result = {mode:'player-event',faction,title:plan.label,player:plan.player,dice,rng:draft.rng}
+    else if (plan.requests?.length || plan.afterRaid) {
+      result = {...battlePlan(plan.label,plan.requests,plan.description,null,plan.base),option:'event',afterRaid:plan.afterRaid,overrides:plan.overrides}
+    } else result = auto(plan.option,plan.label,plan.description,plan.base ?? draft,plan.overrides)
+    if (isPivotalCard(current.id)) return explain(result,'8.1.3',`The declared Pivotal #${current.id} resolves first.`)
+    if (shield(current.symbols[faction])) return explain(result,priorityEvent,`Revealed Event #${current.id} shows a Shield for ${NAMES[faction]}.`)
+    return explain(result,optionalEvent,`The Event check selected effective Event #${current.id}.`)
   }
   if (!choices.myrddin && state.current >= 73 && state.current <= 76 && !state.acts.length) {
-    return resolveEvent() || auto('event',current.title,'The declared Pivotal Event resolved with no further board changes.')
+    return resolveEvent() || explain(auto('event',current.title,'The declared Pivotal Event resolved with no further board changes.'),'8.1.3','The Pivotal was declared.')
   }
   if (!choices.myrddin && faction === 'd' && state.imperium === 'ac' && state.tracks.blue &&
       botHasHuman(state,'c') && typeof choices.blueConsent !== 'boolean') {
@@ -2109,7 +2155,8 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   }
   if (faction === 'd') {
     const intercept = planDuxIntercept(draft,roll,allowance)
-    if (intercept) return battlePlan(`Intercept${intercept.feat ? ' + '+intercept.feat : ''}`,intercept.requests,intercept.notes.join('. '),intercept.feat,intercept.state)
+    if (intercept) return explain(battlePlan(`Intercept${intercept.feat ? ' + '+intercept.feat : ''}`,intercept.requests,intercept.notes.join('. '),intercept.feat,intercept.state),
+      '8.8.1','The Raiders that Dux can engage in Friendly Control exceed the 2D6 roll.')
   }
   if (['x','s'].includes(faction)) {
     const raider = faction+'r'
@@ -2117,10 +2164,12 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const onMap = sum(REGIONS.map(({name}) => on(state.land[name],raider)))
     const clear = REGIONS.filter(({name,terrain}) => terrain === 'Clear' && on(state.land[name],raider)).length
     const plunder = sum(REGIONS.map(({name}) => loaded(state.land[name],raider) + loaded(state.land[name],band)))
-    if (clear >= 2 || onMap >= 15 || (plunder > 2 && plunder > roll(6,'Return · first die') + roll(6,'Return · second die'))) {
+    const returnReason = clear >= 2 ? `Raiders occupy ${clear} Clear Regions.` : onMap >= 15 ? `${onMap} Raiders are on the map.` :
+      plunder > 2 && plunder > roll(6,'Return · first die') + roll(6,'Return · second die') ? `${plunder} Plunder exceeds the 2D6 roll.` : ''
+    if (returnReason) {
       const returning = barbarianReturn(draft,faction,roll,allowance)
       if (returning) {
-        return auto(returning.feat ? 'feat' : 'command',`Return${returning.feat ? ' + '+returning.feat : ''}`,returning.notes.join('. '))
+        return explain(auto(returning.feat ? 'feat' : 'command',`Return${returning.feat ? ' + '+returning.feat : ''}`,returning.notes.join('. ')),rule+'.1',returnReason)
       }
     }
   }
@@ -2132,16 +2181,19 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const result = resolveEvent()
     if (result) return result
   } else if (!choices.myrddin && next && next.order.indexOf(faction) < 2 && shield(next.symbols[faction])) {
-    return auto('pass','Pass',`Priority Event #${next.id} shows ${NAMES[faction]} in the first two positions.`)
+    return explain(auto('pass','Pass',`Priority Event #${next.id} shows ${NAMES[faction]} in the first two positions.`),priorityEvent,
+      `The next revealed card has a Shield in position ${next.order.indexOf(faction)+1}.`)
   }
   if (faction === 'c') {
     if (roll(6,'Civitates March decision') <= 2 && state.tracks.blue > 10) {
       const marching = planBritonMarch(draft,'c',roll,allowance)
-      if (marching) return auto(marching.feat ? 'feat' : 'command',marching.title,marching.desc,marching.state)
+      if (marching) return explain(auto(marching.feat ? 'feat' : 'command',marching.title,marching.desc,marching.state),
+        '8.7.3','The D6 roll is 1 or 2, blue Resources exceed 10, and troops can move.')
     }
     const pool = availability(state)
     const availableTroops = pool.mil+pool.com
-    const tryMuster = availableTroops > roll(6,'Civitates Muster · first die')+roll(6,'Civitates Muster · second die') || civMusterImprovesControl(state)
+    const musterRoll = roll(6,'Civitates Muster · first die')+roll(6,'Civitates Muster · second die')
+    const tryMuster = availableTroops > musterRoll || civMusterImprovesControl(state)
     if (!tryMuster && eventAllowed) {
       const result = resolveEvent()
       if (result) return result
@@ -2149,7 +2201,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const notes = tryMuster ? civitatesMuster(draft,roll,allowance) : []
     const command = notes.length ? 'Muster' : 'Trade'
     if (!notes.length) notes.push(...civitatesTrade(draft,roll,allowance))
-    if (!notes.length) return auto('pass','Pass','Neither Muster nor Trade met its printed requirements.')
+    if (!notes.length) return explain(auto('pass','Pass','Neither Muster nor Trade met its printed requirements.'),'8.7.6','Trade has no eligible Town or restoration to add.')
     let feat = null
     if (allowance.allowedFeat) {
       const rule = civitatesRule(draft,roll)
@@ -2164,35 +2216,39 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
         }
       }
     }
-    return auto(feat ? 'feat' : 'command',`${command}${feat ? ' + '+feat : ''}`,notes.join('. '))
+    const plan = auto(feat ? 'feat' : 'command',`${command}${feat ? ' + '+feat : ''}`,notes.join('. '))
+    if (command === 'Trade') return explain(plan,'8.7.6','The preceding Battle, Event, March and Muster checks yielded no action. Trade can collect Resources or restore Prosperity.')
+    return explain(plan,'8.7.4',availableTroops > musterRoll ? `${availableTroops} Available Troops exceed the 2D6 total of ${musterRoll}.` : 'Muster can add Briton Control.')
   }
   if (faction === 'd') {
     const battle = tryPolicyBattle()
     if (battle) return battle
     if (canTrain(state,allowance.oneSpace,allowance.blueConsent)) {
       const training = duxTrain(draft,roll,allowance)
-      if (training.guided) return guide('Dux · Train',[
+      if (training.guided) return explain(guide('Dux · Train',[
         ...(training.placements?.length ? ['Projected Cavalry placements: ' + training.placements.join('; ')] : []),
         ...(training.notes || []),training.guided,
-      ],{suggested:'feat',command:'Train'})
-      return auto(training.feat ? 'feat' : 'command',`Train${training.feat ? ' + '+training.feat : ''}`,[...training.placements,...training.notes].join(' '))
+      ],{suggested:'feat',command:'Train'}),'8.8.4','Dux can afford to place at least two Cavalry.')
+      return explain(auto(training.feat ? 'feat' : 'command',`Train${training.feat ? ' + '+training.feat : ''}`,[...training.placements,...training.notes].join(' ')),
+        '8.8.4','Dux can afford to place at least two Cavalry.')
     }
     if (eventAllowed && roll(6,'Dux Event choice') <= 4) {
       const result = resolveEvent()
       if (result) return result
     }
     const march = planBritonMarch(draft,'d',roll,allowance)
-    if (march) return auto(march.feat ? 'feat' : 'command',march.title,march.desc,march.state)
-    return auto('pass','Pass','The verified checks yielded no available Command or Event.')
+    if (march) return explain(auto(march.feat ? 'feat' : 'command',march.title,march.desc,march.state),
+      '8.8.6','A priority destination can be reached within the D4 origin and destination limits.')
+    return explain(auto('pass','Pass','The verified checks yielded no available Command or Event.'),'8.8.6','No affordable March from an eligible origin met the priorities.')
   }
 
   const hasWarbands = REGIONS.some(({name}) => on(state.land[name],faction+'w'))
   if (hasWarbands && faction === 'x' && allowance.allowedFeat && roll(6,'Saxons March decision') <= 2) {
     const march = planBarbarianMarch(draft,faction,roll,allowance)
-    if (march?.feat) return auto('feat',march.title,march.desc,march.state)
+    if (march?.feat) return explain(auto('feat',march.title,march.desc,march.state),'8.6.3','The March roll is 1 or 2 and Settle can add a piece or Population.')
     if (settleWithoutReturn(draft,faction,null)) {
       const result = barbarianReturn(draft,faction,roll,{...allowance,forSettle:true})
-      if (result?.feat) return auto('feat','Return + '+result.feat,result.notes.join('. '))
+      if (result?.feat) return explain(auto('feat','Return + '+result.feat,result.notes.join('. ')),'8.6.3','Settle can add something without moving Warbands, so Return accompanies it.')
     }
   }
   if (hasWarbands) {
@@ -2200,7 +2256,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     if (battle) return battle
     if (faction === 's' && availability(state).sw === 0) {
       const march = planBarbarianMarch(draft,faction,roll,allowance)
-      if (march) return auto(march.feat ? 'feat' : 'command',march.title,march.desc,march.state)
+      if (march) return explain(auto(march.feat ? 'feat' : 'command',march.title,march.desc,march.state),'8.5.4','No Warbands remain Available, and existing Warbands can March.')
     }
   }
   const freeRaiders = availability(state)[faction+'r']
@@ -2210,17 +2266,19 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   }
   if (freeRaiders || faction === 's' && state.tracks.niall) {
     const raid = planRaid(draft,faction,roll,allowance)
-    if (raid.guide) return guide(`${NAMES[faction]} · Raid${raid.feat ? ' + '+raid.feat : ''}`,raid.guide,{
+    const raidRule = faction === 'x' ? '8.6.5' : '8.5.4'
+    const raidReason = 'Raiders and an eligible route are available for the selected target.'
+    if (raid.guide) return explain(guide(`${NAMES[faction]} · Raid${raid.feat ? ' + '+raid.feat : ''}`,raid.guide,{
       suggested:actionSlot(raid.feat ? 'feat':'command'),command:'Raid',
-    })
+    }),raidRule,raidReason)
     const raidLabel = `Raid${raid.feat ? ' + '+raid.feat : ''}`
     const raidDescription = [raid.description,...raid.notes].join(' ')
-    if (raid.requests?.length) return battlePlan(raidLabel,raid.requests,raidDescription,raid.feat,raid.state)
-    if (raid.state) return auto(raid.feat ? 'feat':'command',raidLabel,raidDescription,raid.state)
+    if (raid.requests?.length) return explain(battlePlan(raidLabel,raid.requests,raidDescription,raid.feat,raid.state),raidRule,raidReason)
+    if (raid.state) return explain(auto(raid.feat ? 'feat':'command',raidLabel,raidDescription,raid.state),raidRule,raidReason)
   }
   if (hasWarbands && faction === 's') {
     const march = planBarbarianMarch(draft,faction,roll,allowance)
-    if (march) return auto(march.feat ? 'feat' : 'command',march.title,march.desc,march.state)
+    if (march) return explain(auto(march.feat ? 'feat' : 'command',march.title,march.desc,march.state),'8.5.6','No Raid target qualifies, and Warbands can move to a priority destination.')
   }
-  return auto('pass','Pass','No Raid target met the available Renown and targeting requirements.')
+  return explain(auto('pass','Pass','No Raid target met the available Renown and targeting requirements.'),faction === 'x' ? '8.6.5' : '8.5.6','No eligible target could be reached with the available forces and Renown.')
 }
