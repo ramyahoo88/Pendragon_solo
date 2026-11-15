@@ -172,7 +172,7 @@ function setup(game) {
   const pivot = FACTIONS.filter(faction => game.pivotal?.[faction] === 'ready').map(faction => '#'+PIVOTAL[faction])
   return `<section class="panel"><div class="panel-body stack">
     ${topLabel(advancing ? 'Advance the deck' : automatic ? 'Start the campaign' : 'Enter the opening cards')}
-    <p class="muted">${advancing ? nextText : automatic ? 'Shuffle the scenario deck and reveal the first two Events.' : 'Set up the physical board, then enter the two face-up card numbers from your deck.'}</p>
+    <p class="muted">${advancing ? nextText : automatic ? 'The app shuffles the scenario deck and reveals the first two Events.' : 'Set up the physical board, then enter the two face-up card numbers from your deck.'}</p>
     <form id="cards-form" class="stack">${fields}
       <button type="submit" class="btn primary">${advancing ? 'Advance card' : 'Start game'} ${icon('arrow')}</button>
     </form>
@@ -932,6 +932,7 @@ function openNew() {
       ${field('Difficulty',`<select name="difficulty">${selectOptions(DIFFICULTIES.map(label => [label,label]),game.difficulty)}</select>`)}
       ${field('Deck',`<select name="deckMode">${selectOptions([['physical','Physical deck · enter revealed card numbers'],['digital','Digital deck · reveal in app']],game.deckMode || 'physical')}</select>`)}
     </div>
+    <p class="small muted" data-setup-entropy${game.scenario === 'Petty Tyrants' && seat === 'britons' ? '' : ' hidden'}>Petty Tyrants starts at Fragmentation. Entropy applies immediately, so you start with the Briton faction farther from victory. On a tie, you choose.</p>
     ${descriptorField({key:'variant',label:'Use the optional setup changes (Petty Tyrants and The Harder They Fall)',type:'check'},{variant:game.variant})}
     <p class="small muted">${EDITION}</p><button type="submit" class="btn primary">Start new game</button></form>`,button('Cancel','close','ghost'),'reset')
 }
@@ -1125,6 +1126,10 @@ document.addEventListener('change',async event => {
   try {
     if (target.id === 'import-file') await completeImport(target.files[0])
     if (target.id === 'select-space' && target.value) openEditor('region',target.value)
+    if (target.form?.id === 'new-form' && ['scenario','seat'].includes(target.name)) {
+      const {scenario,seat} = target.form.elements
+      target.form.querySelector('[data-setup-entropy]').hidden = scenario.value !== 'Petty Tyrants' || seat.value !== 'britons'
+    }
     if (target.form?.id === 'event-battle-form' && ['battleAttacker','battleSpace'].includes(target.name)) eventBattleDialog()
     if (target.form?.id === 'epoch-form' && (target.dataset.refresh || target.name === 'method')) {
       const advanced = target.closest('details')?.open
@@ -1182,7 +1187,9 @@ document.addEventListener('submit',event => {
     }
     if (form.id === 'new-form') {
       const {scenario,seat,difficulty,deckMode,variant} = Object.fromEntries(new FormData(form))
-      reloadStorage(fresh(opening(undefined,{scenario,seat,difficulty,deckMode,variant:Boolean(variant)})))
+      const game = opening(undefined,{scenario,seat,difficulty,deckMode,variant:Boolean(variant)})
+      settleEntropy(game)
+      reloadStorage(fresh(game))
       message('New campaign ready.')
     }
     if (form.id === 'battle-form') {

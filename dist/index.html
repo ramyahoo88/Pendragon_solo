@@ -170,7 +170,7 @@ legend{padding:0 5px;color:var(--muted);font-size:12px;font-weight:650}
 const modules = {"data":{},"cards":{},"scenarios":{},"position":{},"sequence":{},"battle":{},"commands":{},"operations":{},"grants":{},"epoch-economy":{},"events":{},"event-policy":{},"bots":{},"action-resolution":{},"session":{},"ui":{}}
 ;
 (() => {
-const VERSION = '0.3.1'
+const VERSION = '0.3.2'
 const SCHEMA = 1
 const EDITION = 'GMT Living Rules · November 2023'
 const SCENARIO = 'Barbarian Conspiracy'
@@ -950,6 +950,7 @@ function startCards(state, current, next) {
   state.eligibility = [...FACTIONS]
   assignPair(state, current, next)
   log(state, `Revealed #${current} and #${next}`, 'All factions begin eligible (§2.1).')
+  settleEntropy(state)
 }
 const pivotalPreconditions = {
   s: () => true,
@@ -1351,7 +1352,7 @@ Object.assign(modules["sequence"],{ACTIONS,isPivotalCard,inCardOrder,turn,action
 ;
 (() => {
 const { BY_NAME, GROUP, NAMES, PIECES } = modules["data"]
-const { addProsperity, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, isFragmentation, isRaider, loaded, on, plunderTo, toOwner, totalProsperity } = modules["position"]
+const { addProsperity, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, hasStronghold, isFragmentation, isRaider, loaded, on, plunderTo, toOwner, totalProsperity } = modules["position"]
 const briton = faction => faction === 'd' || faction === 'c'
 const humanSide = (state,faction) => (state.humans ?? [state.human]).includes(faction)
 const activeSide = (state,number,side) => state.markers[number]?.side === side
@@ -1382,13 +1383,14 @@ function battleEnemies(state,name,attacker,source = 'Battle') {
   const land = state.land[name]
   if (!land) return []
   const order = ['d','c','x','s'].filter(faction => faction !== attacker)
+  const shadedCross = activeSide(state,33,'shaded') && commandBattle(source)
   const factions = order.filter(faction => {
-    if (activeSide(state,33,'shaded') && commandBattle(source) && [attacker,faction].includes('c') && [attacker,faction].includes('s')) return false
+    if (shadedCross && (attacker === 'c' && faction === 's' || attacker === 's' && faction === 'c')) return false
     if (source === 'Intercept' && !['x','s'].includes(faction)) return false
     if (source === 'Intercept') return on(land,faction+'r') > 0
     const [,defenders] = battleSides(state,attacker,faction)
-    return Object.keys(GROUP).some(key => defenders.includes(GROUP[key].owner) && on(land,key)) ||
-      land.sites.some(site => site && defenders.includes(toOwner(site.piece,site.employer)))
+    const targets = shadedCross && attacker === 's' && faction === 'd' ? ['d'] : defenders
+    return Object.keys(GROUP).some(key => targets.includes(GROUP[key].owner) && on(land,key)) || hasStronghold(land,targets)
   })
   if (!briton(attacker) && !isFragmentation(state) && factions.includes('d') && factions.includes('c')) {
     return factions.filter(f => f !== 'c')
@@ -1484,16 +1486,23 @@ function runBattle(state,config,roll,reply = null) {
   ensure(land && battleEnemies(state,name,attacker,config.source).includes(defender), 'Choose an enemy faction in the Battle space.')
   const [attacking,defending] = battleSides(state,attacker,defender)
   const civilBattle = !isFragmentation(state) && attacking.every(briton) && defending.every(briton)
-  const battleMilitia = (units,primary) => activeSide(state,16,'shaded') && primary === 'd' ? units.filter(unit => unit.key !== 'mil') : units
-  const participants = battleMilitia(landTokens(land,attacking,'a-',config.attackers),attacker)
-  const defenders = battleMilitia(landTokens(land,defending,'d-',config.defenders),defender)
+  const details = []
+  const bellorum = (units,lead,fortDefends = false) => {
+    if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
+      !(fortDefends || units.some(unit => unit.owner === 'd'))) return units
+    const civitatesLead = lead === 'c' && !fortDefends
+    details.push(`Dux Bellorum: ${civitatesLead ? 'Dux Units' : 'Militia'} sit out this Battle.`)
+    return units.filter(unit => civitatesLead ? unit.owner !== 'd' : unit.key !== 'mil')
+  }
+  const participants = bellorum(landTokens(land,attacking,'a-',config.attackers),attacker)
+  const defenders = bellorum(landTokens(land,defending,'d-',config.defenders),config.reactionFaction ?? defender,
+    defending.includes('d') && hasStronghold(land,['d']))
   ensure(participants.length,'The attacking side must have participating Units.')
   ensure(!commandBattle(config.source) || participants.some(unit => unit.owner === attacker && !isRaider(unit.key)), 'A Battle Command requires a Troop of the executing faction.')
   const sites = land.sites.flatMap((site,index) =>
     site && defending.includes(toOwner(site.piece,site.employer))
       ? [{ ...site,...strongholdStats(state,name,site.piece),index,owner:toOwner(site.piece,site.employer),used:false,destroyed:false }]
       : [])
-  const details = []
   const destroyed = []
   const destroyedPieces = []
   const fought = new Set()
@@ -2965,6 +2974,15 @@ function raidPrice(state,faction,dice,options) {
   if (faction === 's' && state.markers[63]?.side === 'unshaded') price++
   return price
 }
+function raidBonusPlunder(state,name,faction,controller,emptyRaiders) {
+  const marker = state.markers[70]
+  if ((controller !== 'b' && controller !== 'c') || BY_NAME[name].terrain === 'City' ||
+    marker?.side !== 'shaded' || marker.faction !== faction) return 0
+  changeTrack(state,'wealth',-1)
+  if (emptyRaiders <= 0 || goldAvailable(state) <= 0) return 0
+  state.land[name].units[faction+'r'][1]++
+  return 1
+}
 function progressDecision(reply,stage,title,options,defaultValue) {
   if (!reply || options.length < 2) return defaultValue
   return reply({stage,title,options,defaultValue,progress:[]})
@@ -3220,22 +3238,15 @@ function runMilitary(state,spec,roll,fight,reply) {
     if (!lastOutcome?.attackerEvaded) {
       taken = plunderTo(land,kind,Math.min(potential,surviving-(lastOutcome?.attackerPlunder ?? 0)))
     }
-    const ruin = state.markers[70]
-    let bonus = 0
-    if (oldControl === 'b' && ruin?.side === 'shaded' && ruin.faction === faction) {
-      if (!lastOutcome?.attackerEvaded && taken+(lastOutcome?.attackerPlunder ?? 0) < surviving && goldAvailable(state)) {
-        land.units[kind][1]++
-        bonus++
-      }
-      changeTrack(state,'wealth',-1)
-    }
+    const emptyRaiders = lastOutcome?.attackerEvaded ? 0 : surviving-taken-(lastOutcome?.attackerPlunder ?? 0)
+    const bonus = raidBonusPlunder(state,name,faction,oldControl,emptyRaiders)
     changeTrack(state,enemy,-(oldControl === enemy ? taken+bonus : 0)-levyForSettlements(lastOutcome))
     if (ravage && roll(6,'Ravage · '+name) >= 4 && land.pop) {
       land.pop--
       state.tracks.refugees = Math.min(4,state.tracks.refugees+1)
     }
     const ransom = feat === 'Ransom' && selected(row.tactic) ? applyRansom(state,name,roll,reply) : ''
-    notes.push(`${name}: ${arrive} land via ${row.route.label}; ${taken} Plunder.${ransom}`)
+    notes.push(`${name}: ${arrive} land via ${row.route.label}; ${taken+bonus} Plunder.${ransom}`)
     const enemies = raidTroopSides(state,name,faction)
     if (!forced && selected(row.battle) && enemies.length) {
       const defender = correctEnemy(row.enemy,enemies)
@@ -3270,7 +3281,7 @@ function runMilitary(state,spec,roll,fight,reply) {
   return notes.join(' ')
 }
 
-Object.assign(modules["operations"],{raidPaths,raidResponders,botForcesRaidBattle,militaryFields,runMilitary})
+Object.assign(modules["operations"],{raidPaths,raidBonusPlunder,raidResponders,botForcesRaidBattle,militaryFields,runMilitary})
 })()
 ;
 (() => {
@@ -6229,7 +6240,7 @@ const { botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent }
 const { hasEventEffect, selectBotEventInput } = modules["event-policy"]
 const { grantRule, setGrantMarkers } = modules["grants"]
 const { runCommand, runCommandFeat } = modules["commands"]
-const { botForcesRaidBattle, raidResponders } = modules["operations"]
+const { botForcesRaidBattle, raidBonusPlunder, raidResponders } = modules["operations"]
 const { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } = modules["position"]
 const { actionOptions, activeFaction, finishAction, pivotalOptions, resolveImperium } = modules["sequence"]
 function makeRoller(state, history, scripted = []) {
@@ -7582,7 +7593,7 @@ function guaranteedRaidAssault(state,request) {
     battleForecast(state,{...request,...defence,defenderAmbush,assumeCoup:request.surprise}).destroyed.length > 0))
 }
 function raidOpposition(state,name,faction) {
-  return battleEnemies(state,name,faction).filter(defender => hasStronghold(state.land[name],defenderSides(state,faction,defender)))
+  return battleEnemies(state,name,faction,'Raid').filter(defender => hasStronghold(state.land[name],defenderSides(state,faction,defender)))
 }
 function raidRequest(state,faction,target,arrived,loadedOnArrival,feat,standingControl) {
   const {name} = target
@@ -7742,11 +7753,8 @@ function planRaid(start,faction,roll,{oneSpace = false,allowedFeat = true,free =
       continue
     }
     const limit = target.ravaging ? arriving : Math.min(arriving,space.pop)
-    let taken = plunderTo(space,raider,limit)
-    if (effectiveMarker(state,70,'shaded',faction) && friendlyControl(start,target.name,'c')) {
-      changeTrack(state,'wealth',-1)
-      if (taken < arriving && goldAvailable(state)>0) {taken++;space.units[raider][1]++}
-    }
+    const basePlunder = plunderTo(space,raider,limit)
+    const taken = basePlunder+raidBonusPlunder(state,target.name,faction,startingControl,arriving-basePlunder)
     if (startingControl === other) changeTrack(state,other,-taken)
     notes.push(`${target.name}: ${arriving} land and take ${taken} Plunder.`)
     if (target.ravaging && roll(6,'Ravage · '+target.name) >= 4 && space.pop) {
@@ -8459,7 +8467,7 @@ const { BattleChoice, runBattle } = modules["battle"]
 const { runCommand } = modules["commands"]
 const { eventBattleRequests, runEvent } = modules["events"]
 const { grantOperation, humanSaxonResponse, runGrantedEvent } = modules["grants"]
-const { runMilitary } = modules["operations"]
+const { raidBonusPlunder, runMilitary } = modules["operations"]
 const { availability, changeTrack, clone, ensure, isHumanFaction, loaded, on, plunderTo } = modules["position"]
 const { finishAction, log } = modules["sequence"]
 const { makeRoller, planBotGrant, planRaid } = modules["bots"]
@@ -8481,12 +8489,14 @@ function replayAction(state,job,answers=[]) {
     return answer
   }
   function finishDeepRaid(config,survivors,evaded) {
-    if (evaded || !survivors || BY_NAME[config.name].terrain === 'City') return 0
-    const land = after.land[config.name]
-    const take = plunderTo(land,config.attacker+'r',Math.min(land.pop,survivors))
-    if (config.raidOpponent) changeTrack(after,config.raidOpponent,-take)
-    if (take) data.push('Surviving Deep Raiders take '+take+' Plunder.')
-    return take
+    const {name,attacker,raidController,raidOpponent} = config
+    const land = after.land[name]
+    const emptyRaiders = evaded || BY_NAME[name].terrain === 'City' ? 0 : survivors
+    const basePlunder = plunderTo(land,attacker+'r',Math.min(land.pop,emptyRaiders))
+    const taken = basePlunder+raidBonusPlunder(after,name,attacker,raidController,emptyRaiders-basePlunder)
+    if (raidOpponent) changeTrack(after,raidOpponent,-taken)
+    if (taken) data.push('Surviving Deep Raiders take '+taken+' Plunder.')
+    return taken
   }
   function fight(config) {
     lastSpace = config.name
@@ -8852,7 +8862,7 @@ function setup(game) {
   const pivot = FACTIONS.filter(faction => game.pivotal?.[faction] === 'ready').map(faction => '#'+PIVOTAL[faction])
   return `<section class="panel"><div class="panel-body stack">
     ${topLabel(advancing ? 'Advance the deck' : automatic ? 'Start the campaign' : 'Enter the opening cards')}
-    <p class="muted">${advancing ? nextText : automatic ? 'Shuffle the scenario deck and reveal the first two Events.' : 'Set up the physical board, then enter the two face-up card numbers from your deck.'}</p>
+    <p class="muted">${advancing ? nextText : automatic ? 'The app shuffles the scenario deck and reveals the first two Events.' : 'Set up the physical board, then enter the two face-up card numbers from your deck.'}</p>
     <form id="cards-form" class="stack">${fields}
       <button type="submit" class="btn primary">${advancing ? 'Advance card' : 'Start game'} ${icon('arrow')}</button>
     </form>
@@ -9612,6 +9622,7 @@ function openNew() {
       ${field('Difficulty',`<select name="difficulty">${selectOptions(DIFFICULTIES.map(label => [label,label]),game.difficulty)}</select>`)}
       ${field('Deck',`<select name="deckMode">${selectOptions([['physical','Physical deck · enter revealed card numbers'],['digital','Digital deck · reveal in app']],game.deckMode || 'physical')}</select>`)}
     </div>
+    <p class="small muted" data-setup-entropy${game.scenario === 'Petty Tyrants' && seat === 'britons' ? '' : ' hidden'}>Petty Tyrants starts at Fragmentation. Entropy applies immediately, so you start with the Briton faction farther from victory. On a tie, you choose.</p>
     ${descriptorField({key:'variant',label:'Use the optional setup changes (Petty Tyrants and The Harder They Fall)',type:'check'},{variant:game.variant})}
     <p class="small muted">${EDITION}</p><button type="submit" class="btn primary">Start new game</button></form>`,button('Cancel','close','ghost'),'reset')
 }
@@ -9805,6 +9816,10 @@ document.addEventListener('change',async event => {
   try {
     if (target.id === 'import-file') await completeImport(target.files[0])
     if (target.id === 'select-space' && target.value) openEditor('region',target.value)
+    if (target.form?.id === 'new-form' && ['scenario','seat'].includes(target.name)) {
+      const {scenario,seat} = target.form.elements
+      target.form.querySelector('[data-setup-entropy]').hidden = scenario.value !== 'Petty Tyrants' || seat.value !== 'britons'
+    }
     if (target.form?.id === 'event-battle-form' && ['battleAttacker','battleSpace'].includes(target.name)) eventBattleDialog()
     if (target.form?.id === 'epoch-form' && (target.dataset.refresh || target.name === 'method')) {
       const advanced = target.closest('details')?.open
@@ -9862,7 +9877,9 @@ document.addEventListener('submit',event => {
     }
     if (form.id === 'new-form') {
       const {scenario,seat,difficulty,deckMode,variant} = Object.fromEntries(new FormData(form))
-      reloadStorage(fresh(opening(undefined,{scenario,seat,difficulty,deckMode,variant:Boolean(variant)})))
+      const game = opening(undefined,{scenario,seat,difficulty,deckMode,variant:Boolean(variant)})
+      settleEntropy(game)
+      reloadStorage(fresh(game))
       message('New campaign ready.')
     }
     if (form.id === 'battle-form') {

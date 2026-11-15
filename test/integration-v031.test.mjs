@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { battleForecast, runBattle } from '../src/battle.mjs'
-import { barbarianReturn, eventPlan } from '../src/bots.mjs'
+import { battleEnemies, battleForecast, runBattle } from '../src/battle.mjs'
+import { replayAction } from '../src/action-resolution.mjs'
+import { barbarianReturn, duxTrain, eventPlan, planRaid } from '../src/bots.mjs'
 import { runCommand, runCommandFeat } from '../src/commands.mjs'
 import { GROUPS } from '../src/data.mjs'
 import { runEvent } from '../src/events.mjs'
-import { runMilitary } from '../src/operations.mjs'
-import { availability, boardTotals, clone, opening, validatePosition } from '../src/position.mjs'
-import { advanceCard, advanceEpoch, activeFaction, finishAction, planAnnona, startCards, validateSave } from '../src/sequence.mjs'
+import { raidPaths, raidResponders, runMilitary } from '../src/operations.mjs'
+import { availability, boardTotals, clone, opening, setImperium, validatePosition } from '../src/position.mjs'
+import { advanceCard, advanceEpoch, activeFaction, finishAction, planAnnona, startCards, startDigitalDeck, validateSave } from '../src/sequence.mjs'
 import { fresh, parseSave, push, rewind, serialize } from '../src/session.mjs'
 
 const one = () => 1
@@ -305,4 +306,174 @@ test('upgrading a saved Battle keeps the board and command and revisits tactical
   assert.deepEqual(restored.game,game)
   assert.deepEqual(restored.work.input.battle.job.operation,operation)
   assert.deepEqual(restored.work.input.battle.answers,[])
+})
+
+test('shaded Dux Bellorum keeps the lead faction in the field and allows Comitates to fight with Dux',() => {
+  const name = 'Corieltauvi'
+  for (const [attacker,militia,expectedField,prestige] of [['c',1,2,0],['d',1,4,1],['c',0,4,1]]) {
+    const game = clearBoard(attacker)
+    game.markers[16] = {type:'momentum',side:'shaded'}
+    game.pools.notYet--
+    const land = game.land[name]
+    Object.assign(land.units,{cav:[3,0],com:[1,0],mil:[militia,0],xr:[1,0]})
+    const report = runBattle(game,{name,attacker,defender:'x',source:'Battle'},one)
+    assert.equal(report.attackerField,expectedField)
+    assert.equal(report.prestigeChange,prestige)
+    assert.equal(land.units.cav[0],3)
+    assert.equal(land.units.mil[0],militia)
+    validatePosition(game)
+  }
+})
+
+test('shaded Dux Bellorum leaves Militia in Battle against an attacker when no Dux pieces defend',() => {
+  const name = 'Corieltauvi'
+  const game = clearBoard()
+  game.markers[16] = {type:'momentum',side:'shaded'}
+  Object.assign(game.land[name].units,{mil:[2,0],xw:[1,0]})
+  const report = runBattle(game,{name,attacker:'x',defender:'d',source:'Battle'},one)
+  assert.equal(report.defenderLosses,2)
+})
+
+test('shaded Ruin of the Villas gives a player or bot Plunder and reduces Wealth under Civitates Control',() => {
+  const name = 'Durotriges'
+  for (const [die,hold,prosperity,expected] of [[2,'town',1,[4,2,1]],[1,'town',2,[2,2,1]],[2,'fort',1,[4,1,0]]]) {
+    const game = clearBoard('s')
+    setImperium(game,'f')
+    game.markers[70] = {type:'momentum',side:'shaded',faction:'s'}
+    game.seas.hib = false
+    game.tracks.wealth = 10
+    putHold(game,name,0,hold)
+    game.land[name].pros = [prosperity,0]
+    const wealth = game.tracks.wealth
+    const bot = planRaid(game,'s',() => die,{allowedFeat:false,oneSpace:true,free:true,onlyTargets:space => space === name})
+    resolveMilitary(game,{faction:'s',command:'Raid',rows:[{space:name,route:'hib'}]},() => die)
+    for (const position of [game,bot.state]) {
+      const [count,plunder] = position.land[name].units.sr
+      assert.deepEqual([count,plunder,wealth-position.tracks.wealth],expected)
+    }
+  }
+})
+
+test('Ruin of the Villas reduces Wealth for Deep Raid arrivals and adds Plunder only when Raiders survive',() => {
+  const name = 'Cornovii'
+  for (const [comitates,survivors] of [[0,2],[2,0]]) {
+    const game = clearBoard('c')
+    setImperium(game,'f')
+    game.markers[70] = {type:'momentum',side:'shaded',faction:'s'}
+    game.tracks.wealth = 10
+    game.pools.notYet -= comitates
+    putHold(game,name,0,'town')
+    game.land[name].pros = [1,0]
+    Object.assign(game.land[name].units,{com:[comitates,0],sr:[2,0]})
+    const job = {requests:[{name,source:'Deep Raid',attacker:'s',defender:'c',attackers:{sr:[2,0]},
+      afterDeepRaid:true,raidController:'c',landed:2,noWithdraw:true,noAssault:true,ignoreTactics:true}]}
+    const {after} = replayAction(game,job)
+    assert.deepEqual(after.land[name].units.sr,[survivors,survivors])
+    assert.deepEqual(after.land[name].pros,[survivors ? 0 : 1,0])
+    assert.equal(after.tracks.wealth,game.tracks.wealth-1)
+    validatePosition(after)
+  }
+})
+
+test('Non-player Dux needs Friendly Control for a Deep Raid reaction while player Dux can react without it',() => {
+  const name = 'Corieltauvi'
+  const game = clearBoard('x')
+  game.land[name].units.cav = [1,0]
+  assert.deepEqual(raidResponders(game,name,'x',true),[])
+  assert.deepEqual(raidResponders(game,name,'x',false),['d'])
+  putHold(game,name,0,'fort')
+  assert.deepEqual(raidResponders(game,name,'x',true),['d'])
+  const human = clearBoard('d')
+  human.land[name].units.cav = [1,0]
+  assert.deepEqual(raidResponders(human,name,'x',true),['d'])
+})
+
+test('shaded Cross on his Shoulders blocks Battle Commands and permits Scotti Raid Battles',() => {
+  const name = 'Durotriges'
+  const game = clearBoard('s')
+  game.markers[33] = {type:'momentum',side:'shaded'}
+  Object.assign(game.land[name].units,{sw:[1,0],mil:[1,0]})
+  assert.deepEqual(battleEnemies(game,name,'s','Battle'),[])
+  assert.deepEqual(battleEnemies(game,name,'c','Battle'),[])
+  game.land[name].units.cav = [1,0]
+  assert.deepEqual(battleEnemies(game,name,'s','Battle'),['d'])
+  setImperium(game,'f')
+  game.land[name].units.cav = [0,0]
+  assert.deepEqual(battleEnemies(game,name,'s','Deep Raid'),['c'])
+  const requests = resolveMilitary(game,{faction:'s',command:'Raid',rows:[{space:name,route:'hib',battle:true}]})
+  assert.deepEqual(requests.map(request => request.defender),['c'])
+})
+
+test('Non-player Scotti recognizes a Civitates Town as a Raid Battle target under shaded Cross on his Shoulders',() => {
+  const name = 'Durotriges'
+  const game = clearBoard('d')
+  setImperium(game,'f')
+  game.markers[33] = {type:'momentum',side:'shaded'}
+  putHold(game,name,0,'town')
+  const raid = planRaid(game,'s',() => 4,{allowedFeat:false,oneSpace:true,free:true,onlyTargets:space => space === name})
+  assert.equal(raid.requests.length,1)
+  assert.equal(raid.requests[0].source,'Raid')
+  assert.equal(raid.requests[0].defender,'c')
+})
+
+test('Conspiratio Barbarica closes the Scotti homeland route and allows raids from a local coastal base',() => {
+  const game = clearBoard('s')
+  game.markers[73] = {type:'capability',side:'unshaded'}
+  game.seas.sept = false
+  assert.deepEqual(raidPaths(game,'s','Parisi',''),[])
+  const options = {free:true,oneSpace:true,allowedFeat:false,onlyTargets:name => name === 'Parisi'}
+  assert.deepEqual(planRaid(game,'s',one,options).targets,[])
+  putHold(game,'Votadini',0,'ss')
+  game.land.Votadini.units.sw = [1,0]
+  assert.deepEqual(raidPaths(game,'s','Parisi','').map(route => route.key),['sept'])
+  assert.equal(planRaid(game,'s',one,options).targets[0].route.sea,'sept')
+})
+
+test('Retaliate Prestige stacks with victory and the destruction of a Barbarian Settlement',() => {
+  const game = clearBoard('d')
+  const name = 'Corieltauvi'
+  putHold(game,name,1,'ss')
+  Object.assign(game.land[name].units,{cav:[5,0],sw:[1,0]})
+  const battle = {name,attacker:'d',defender:'s',source:'Battle',noWithdraw:true}
+  assert.equal(runBattle(clone(game),battle,one).prestigeChange,2)
+  assert.equal(runBattle(game,{...battle,retaliate:true},one).prestigeChange,5)
+})
+
+test('Non-player Dux trains Militia with Cavalry only before Fragmentation',() => {
+  const name = 'Corieltauvi'
+  for (const [imperium,expected] of [['rm',2],['f',0]]) {
+    const game = clearBoard('s')
+    setImperium(game,imperium)
+    game.tracks.red = 3
+    putHold(game,name,0,'fort')
+    putHold(game,name,1,'town')
+    duxTrain(game,one,{allowedFeat:false,oneSpace:true})
+    assert.equal(game.land[name].units.cav[0],1)
+    assert.equal(game.land[name].units.mil[0],expected)
+  }
+})
+
+test('Devastation halves native Warbands without a matching Settlement and exempts Foederati',() => {
+  const name = 'Corieltauvi'
+  for (const [settlement,expectedLosses] of [[false,0],[true,1]]) {
+    const game = clearBoard('d')
+    game.markers[64] = {type:'momentum',side:'unshaded'}
+    if (settlement) putHold(game,name,1,'ss')
+    Object.assign(game.land[name].units,{dxw:[1,0],sw:[1,0]})
+    const report = runBattle(game,{name,attacker:'d',defender:'s',source:'Battle',noWithdraw:true,noAssault:true},one)
+    assert.equal(report.defenderLosses,1)
+    assert.equal(report.attackerLosses,expectedLosses)
+  }
+})
+
+test('Petty Tyrants resolves Both Britons Entropy before either deck mode gives a faction its first turn',() => {
+  for (const deckMode of ['physical','digital']) {
+    const game = opening(16001,{scenario:'Petty Tyrants',seat:'britons',deckMode})
+    if (deckMode === 'physical') startCards(game,22,5)
+    else startDigitalDeck(game)
+    assert.deepEqual(game.humans,['d'])
+    assert.equal(game.acts.length,0)
+    assert.equal(game.log.at(-1).title,'Entropy')
+    assert.deepEqual(parseSave(serialize(fresh(game))).game.humans,['d'])
+  }
 })

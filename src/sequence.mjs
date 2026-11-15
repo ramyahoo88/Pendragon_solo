@@ -90,6 +90,7 @@ export function startCards(state, current, next) {
   state.eligibility = [...FACTIONS]
   assignPair(state, current, next)
   log(state, `Revealed #${current} and #${next}`, 'All factions begin eligible (§2.1).')
+  settleEntropy(state)
 }
 const pivotalPreconditions = {
   s: () => true,

@@ -1,5 +1,5 @@
 import { BY_NAME, GROUP, NAMES, PIECES } from './data.mjs'
-import { addProsperity, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, isFragmentation, isRaider, loaded, on, plunderTo, toOwner, totalProsperity } from './position.mjs'
+import { addProsperity, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, hasStronghold, isFragmentation, isRaider, loaded, on, plunderTo, toOwner, totalProsperity } from './position.mjs'
 
 const briton = faction => faction === 'd' || faction === 'c'
 const humanSide = (state,faction) => (state.humans ?? [state.human]).includes(faction)
@@ -31,13 +31,14 @@ export function battleEnemies(state,name,attacker,source = 'Battle') {
   const land = state.land[name]
   if (!land) return []
   const order = ['d','c','x','s'].filter(faction => faction !== attacker)
+  const shadedCross = activeSide(state,33,'shaded') && commandBattle(source)
   const factions = order.filter(faction => {
-    if (activeSide(state,33,'shaded') && commandBattle(source) && [attacker,faction].includes('c') && [attacker,faction].includes('s')) return false
+    if (shadedCross && (attacker === 'c' && faction === 's' || attacker === 's' && faction === 'c')) return false
     if (source === 'Intercept' && !['x','s'].includes(faction)) return false
     if (source === 'Intercept') return on(land,faction+'r') > 0
     const [,defenders] = battleSides(state,attacker,faction)
-    return Object.keys(GROUP).some(key => defenders.includes(GROUP[key].owner) && on(land,key)) ||
-      land.sites.some(site => site && defenders.includes(toOwner(site.piece,site.employer)))
+    const targets = shadedCross && attacker === 's' && faction === 'd' ? ['d'] : defenders
+    return Object.keys(GROUP).some(key => targets.includes(GROUP[key].owner) && on(land,key)) || hasStronghold(land,targets)
   })
   if (!briton(attacker) && !isFragmentation(state) && factions.includes('d') && factions.includes('c')) {
     return factions.filter(f => f !== 'c')
@@ -133,16 +134,23 @@ export function runBattle(state,config,roll,reply = null) {
   ensure(land && battleEnemies(state,name,attacker,config.source).includes(defender), 'Choose an enemy faction in the Battle space.')
   const [attacking,defending] = battleSides(state,attacker,defender)
   const civilBattle = !isFragmentation(state) && attacking.every(briton) && defending.every(briton)
-  const battleMilitia = (units,primary) => activeSide(state,16,'shaded') && primary === 'd' ? units.filter(unit => unit.key !== 'mil') : units
-  const participants = battleMilitia(landTokens(land,attacking,'a-',config.attackers),attacker)
-  const defenders = battleMilitia(landTokens(land,defending,'d-',config.defenders),defender)
+  const details = []
+  const bellorum = (units,lead,fortDefends = false) => {
+    if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
+      !(fortDefends || units.some(unit => unit.owner === 'd'))) return units
+    const civitatesLead = lead === 'c' && !fortDefends
+    details.push(`Dux Bellorum: ${civitatesLead ? 'Dux Units' : 'Militia'} sit out this Battle.`)
+    return units.filter(unit => civitatesLead ? unit.owner !== 'd' : unit.key !== 'mil')
+  }
+  const participants = bellorum(landTokens(land,attacking,'a-',config.attackers),attacker)
+  const defenders = bellorum(landTokens(land,defending,'d-',config.defenders),config.reactionFaction ?? defender,
+    defending.includes('d') && hasStronghold(land,['d']))
   ensure(participants.length,'The attacking side must have participating Units.')
   ensure(!commandBattle(config.source) || participants.some(unit => unit.owner === attacker && !isRaider(unit.key)), 'A Battle Command requires a Troop of the executing faction.')
   const sites = land.sites.flatMap((site,index) =>
     site && defending.includes(toOwner(site.piece,site.employer))
       ? [{ ...site,...strongholdStats(state,name,site.piece),index,owner:toOwner(site.piece,site.employer),used:false,destroyed:false }]
       : [])
-  const details = []
   const destroyed = []
   const destroyedPieces = []
   const fought = new Set()

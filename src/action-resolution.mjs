@@ -3,7 +3,7 @@ import { BattleChoice, runBattle } from './battle.mjs'
 import { runCommand } from './commands.mjs'
 import { eventBattleRequests, runEvent } from './events.mjs'
 import { grantOperation, humanSaxonResponse, runGrantedEvent } from './grants.mjs'
-import { runMilitary } from './operations.mjs'
+import { raidBonusPlunder, runMilitary } from './operations.mjs'
 import { availability, changeTrack, clone, ensure, isHumanFaction, loaded, on, plunderTo } from './position.mjs'
 import { finishAction, log } from './sequence.mjs'
 import { makeRoller, planBotGrant, planRaid } from './bots.mjs'
@@ -26,12 +26,14 @@ export function replayAction(state,job,answers=[]) {
     return answer
   }
   function finishDeepRaid(config,survivors,evaded) {
-    if (evaded || !survivors || BY_NAME[config.name].terrain === 'City') return 0
-    const land = after.land[config.name]
-    const take = plunderTo(land,config.attacker+'r',Math.min(land.pop,survivors))
-    if (config.raidOpponent) changeTrack(after,config.raidOpponent,-take)
-    if (take) data.push('Surviving Deep Raiders take '+take+' Plunder.')
-    return take
+    const {name,attacker,raidController,raidOpponent} = config
+    const land = after.land[name]
+    const emptyRaiders = evaded || BY_NAME[name].terrain === 'City' ? 0 : survivors
+    const basePlunder = plunderTo(land,attacker+'r',Math.min(land.pop,emptyRaiders))
+    const taken = basePlunder+raidBonusPlunder(after,name,attacker,raidController,emptyRaiders-basePlunder)
+    if (raidOpponent) changeTrack(after,raidOpponent,-taken)
+    if (taken) data.push('Surviving Deep Raiders take '+taken+' Plunder.')
+    return taken
   }
   function fight(config) {
     lastSpace = config.name

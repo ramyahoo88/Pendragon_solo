@@ -1,4 +1,4 @@
-# Pendragon Solo Companion v0.3.1
+# Pendragon Solo Companion v0.3.2
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
@@ -26,7 +26,7 @@ cmp dist/index.html /tmp/pendragon-rebuild.html
 - Choose **Try a sample Battle** from a fresh campaign for the fight at Corieltauvi. Take the Comitates into Ratae or keep it in the field, then follow the impact through the rest of the Battle. Close or reload the app mid-action to check resume and confirm the same rolls are retained.
 - Choose **Try a sample opening** for Civitates on #22, with #5 showing next. Choose **Command only**, use **Trade** with zero targets to collect in every Town space, and apply. Preview the Dux Pass and then the Scotti Raid. The seeded opening drops Prosperity from 80 to 73 and adds seven Plunder after applying the Raid.
 - Start a physical-deck game as Civitates with #57 Myrddin current and #22 next. Select a revealed card's title to read its effect. Preview the Scotti action to see the Command and Feat the bot selects for Myrddin. If a Battle needs your faction's tactics, the app asks for them before showing the result.
-- Open **Saves → New game** to select a scenario, seat, difficulty, and deck. Use **Board** to inspect spaces, units and supplies. Use the correction controls to match an existing physical position or record a tabletop ruling.
+- Open **Saves → New game** to select a scenario, seat, difficulty, and deck. Petty Tyrants applies Entropy during setup if you select Both Britons. Use **Board** to inspect spaces, units and supplies. Use the correction controls to match an existing physical position or record a tabletop ruling.
 
 ## Rules coverage
 
@@ -43,11 +43,13 @@ cmp dist/index.html /tmp/pendragon-rebuild.html
 
 For #59 Dal Riada, the three-Raider reduction applies to Scotti raids into the named Regions, following the printed card wording. Bots decline a Raid reaction if the protected units could be lost or the Battle has too many possibilities to establish safety. The tabletop outcome option lets you enter a ruling and continue a campaign.
 
+Under shaded #16 Dux Bellorum, Civitates-led attacks with Militia leave Dux units out. Militia sit out when Dux lead or a Dux Fort defends. This convention applies the separation described on Playbook p. 45. The first Pass closes the Pivotal window. The interaction of Living Rules §§2.3.3 and 2.3.8 leaves this timing open to interpretation.
+
 ## Verification
 
-The scripted suite covers the Corieltauvi Battle from the Living Rules, the seven-Raider Scotti Assault in the Playbook, multi-Stronghold Siege, major granted-action sequences, supply and scenario boundaries, both deck modes, and save replay. It also checks former printed-aid cases including Annona, Myrddin, Bryneich, and Ard Ri.
+The 145 scripted tests cover the Corieltauvi Battle from the Living Rules, the seven-Raider Scotti Assault in the Playbook, multi-Stronghold Siege, major granted-action sequences, supply and scenario boundaries, both deck modes, and save replay. The release regressions cover Battle participation under #16, eligible targets under #33, the geographic scope of #73, #70 Plunder and Wealth, and Entropy at setup.
 
-The seeded campaign sweep runs every combination of scenario, seat, and difficulty twice. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. Both use default answers for prompted tactics. The runner validates each position and stops on any bot instruction that cannot be resolved in the app. For v0.3.1 all 192 games reached scoring, with 6,304 bot turns and no printed-aid prompts. The two sweeps exercised 73 of 76 Event IDs. Targeted fixtures cover Stilicho, Aneirin and Fickle Weather.
+The seeded campaign sweep runs every combination of scenario, seat, and difficulty twice. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. Both use default answers for prompted tactics. The runner validates each position and stops on any bot instruction that cannot be resolved in the app. For v0.3.2 all 192 games reached scoring, with 6,289 bot turns and no printed-aid prompts. The two sweeps exercised 73 of 76 Event IDs. Targeted fixtures cover Stilicho, Aneirin and Fickle Weather.
 
 ## References
 

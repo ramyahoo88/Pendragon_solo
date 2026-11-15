@@ -6,7 +6,7 @@ import { botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent 
 import { hasEventEffect, selectBotEventInput } from './event-policy.mjs'
 import { grantRule, setGrantMarkers } from './grants.mjs'
 import { runCommand, runCommandFeat } from './commands.mjs'
-import { botForcesRaidBattle, raidResponders } from './operations.mjs'
+import { botForcesRaidBattle, raidBonusPlunder, raidResponders } from './operations.mjs'
 import { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } from './position.mjs'
 import { actionOptions, activeFaction, finishAction, pivotalOptions, resolveImperium } from './sequence.mjs'
 
@@ -1360,7 +1360,7 @@ function guaranteedRaidAssault(state,request) {
     battleForecast(state,{...request,...defence,defenderAmbush,assumeCoup:request.surprise}).destroyed.length > 0))
 }
 function raidOpposition(state,name,faction) {
-  return battleEnemies(state,name,faction).filter(defender => hasStronghold(state.land[name],defenderSides(state,faction,defender)))
+  return battleEnemies(state,name,faction,'Raid').filter(defender => hasStronghold(state.land[name],defenderSides(state,faction,defender)))
 }
 function raidRequest(state,faction,target,arrived,loadedOnArrival,feat,standingControl) {
   const {name} = target
@@ -1520,11 +1520,8 @@ export function planRaid(start,faction,roll,{oneSpace = false,allowedFeat = true
       continue
     }
     const limit = target.ravaging ? arriving : Math.min(arriving,space.pop)
-    let taken = plunderTo(space,raider,limit)
-    if (effectiveMarker(state,70,'shaded',faction) && friendlyControl(start,target.name,'c')) {
-      changeTrack(state,'wealth',-1)
-      if (taken < arriving && goldAvailable(state)>0) {taken++;space.units[raider][1]++}
-    }
+    const basePlunder = plunderTo(space,raider,limit)
+    const taken = basePlunder+raidBonusPlunder(state,target.name,faction,startingControl,arriving-basePlunder)
     if (startingControl === other) changeTrack(state,other,-taken)
     notes.push(`${target.name}: ${arriving} land and take ${taken} Plunder.`)
     if (target.ravaging && roll(6,'Ravage · '+target.name) >= 4 && space.pop) {

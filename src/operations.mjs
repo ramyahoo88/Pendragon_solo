@@ -66,6 +66,15 @@ function raidPrice(state,faction,dice,options) {
   if (faction === 's' && state.markers[63]?.side === 'unshaded') price++
   return price
 }
+export function raidBonusPlunder(state,name,faction,controller,emptyRaiders) {
+  const marker = state.markers[70]
+  if ((controller !== 'b' && controller !== 'c') || BY_NAME[name].terrain === 'City' ||
+    marker?.side !== 'shaded' || marker.faction !== faction) return 0
+  changeTrack(state,'wealth',-1)
+  if (emptyRaiders <= 0 || goldAvailable(state) <= 0) return 0
+  state.land[name].units[faction+'r'][1]++
+  return 1
+}
 function progressDecision(reply,stage,title,options,defaultValue) {
   if (!reply || options.length < 2) return defaultValue
   return reply({stage,title,options,defaultValue,progress:[]})
@@ -321,22 +330,15 @@ export function runMilitary(state,spec,roll,fight,reply) {
     if (!lastOutcome?.attackerEvaded) {
       taken = plunderTo(land,kind,Math.min(potential,surviving-(lastOutcome?.attackerPlunder ?? 0)))
     }
-    const ruin = state.markers[70]
-    let bonus = 0
-    if (oldControl === 'b' && ruin?.side === 'shaded' && ruin.faction === faction) {
-      if (!lastOutcome?.attackerEvaded && taken+(lastOutcome?.attackerPlunder ?? 0) < surviving && goldAvailable(state)) {
-        land.units[kind][1]++
-        bonus++
-      }
-      changeTrack(state,'wealth',-1)
-    }
+    const emptyRaiders = lastOutcome?.attackerEvaded ? 0 : surviving-taken-(lastOutcome?.attackerPlunder ?? 0)
+    const bonus = raidBonusPlunder(state,name,faction,oldControl,emptyRaiders)
     changeTrack(state,enemy,-(oldControl === enemy ? taken+bonus : 0)-levyForSettlements(lastOutcome))
     if (ravage && roll(6,'Ravage · '+name) >= 4 && land.pop) {
       land.pop--
       state.tracks.refugees = Math.min(4,state.tracks.refugees+1)
     }
     const ransom = feat === 'Ransom' && selected(row.tactic) ? applyRansom(state,name,roll,reply) : ''
-    notes.push(`${name}: ${arrive} land via ${row.route.label}; ${taken} Plunder.${ransom}`)
+    notes.push(`${name}: ${arrive} land via ${row.route.label}; ${taken+bonus} Plunder.${ransom}`)
     const enemies = raidTroopSides(state,name,faction)
     if (!forced && selected(row.battle) && enemies.length) {
       const defender = correctEnemy(row.enemy,enemies)
