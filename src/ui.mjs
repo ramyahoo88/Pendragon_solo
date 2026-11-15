@@ -729,6 +729,7 @@ function dynamicFields(descriptor,input) {
   const ordinary = fields.filter(field => !field.advanced)
   const advanced = fields.filter(field => field.advanced)
   return `<p class="muted">${clean(descriptor.help)}</p>
+    ${descriptor.summary ? '<p>'+clean(descriptor.summary)+'</p>' : ''}
     ${ordinary.length ? '<div class="fields">'+ordinary.map(spec => descriptorField(spec,input)).join('')+'</div>' : ''}
     ${advanced.length ? '<details><summary>Choose spaces and pieces</summary><div class="fields">'+advanced.map(spec => descriptorField(spec,input)).join('')+'</div></details>' : ''}`
 }
@@ -1517,7 +1518,7 @@ document.addEventListener('change',async event => {
       if (advanced && refocused?.closest('details')) refocused.closest('details').open = true
       refocused?.focus({preventScroll:true})
     }
-    if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !target.name.startsWith('eligible') && !/^(rows|feats)\d+-/.test(target.name)))) {
+    if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !/^(eligible|event-recycle-|(rows|feats)\d+-)/.test(target.name)))) {
       if (['option','command','feat','side','grant','grantFeat'].includes(target.name)) {
         for (const key of Object.keys(session.work.input)) if (key.startsWith('rows') || key.startsWith('feats')) delete session.work.input[key]
         delete session.work.input.featTiming

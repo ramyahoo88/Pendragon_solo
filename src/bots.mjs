@@ -2,7 +2,7 @@ import { BY_NAME, GROUPS, NAMES, RANDOM_SPACES, REGIONS, ROADS, SEAS } from './d
 import { card } from './cards.mjs'
 import { printedPopulation, scenarioInfo } from './scenarios.mjs'
 import { battleEnemies, battleForecast, battleTargets, withdrawalCapacity } from './battle.mjs'
-import { botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent } from './events.mjs'
+import { botEventInput, eventBattleRequests, eventChoices, eventSides, rivalCaesarsLosses, runEvent } from './events.mjs'
 import { hasEventEffect, selectBotEventInput } from './event-policy.mjs'
 import { grantRule, setGrantMarkers } from './grants.mjs'
 import { civitatesMusterCapacity, runCommand, runCommandFeat, settleSpaceLimit } from './commands.mjs'
@@ -1834,13 +1834,14 @@ function verifiedEventInput(state,id,faction,side,roll) {
   if (id === 66 && side === 'shaded') {
     const candidates = eventSpaceOptions(state,id,faction,side,'pair').map(pair => {
       const [name,adjacent] = pair.split('/')
-      return {name,pair,rank:[Math.ceil(native(state,name,'d')/2)+Math.ceil(native(state,adjacent,'d')/2)]}
+      const losses = rivalCaesarsLosses(native(state,name,'d'))+rivalCaesarsLosses(native(state,adjacent,'d'))
+      return {name,pair,rank:[losses]}
     })
     const chosen = pickBest(candidates,roll,card(id).title)
     if (!chosen) return null
     const input = {pair:chosen.pair}
     for (const name of chosen.pair.split('/')) {
-      const loss = Math.ceil(native(state,name,'d')/2)
+      const loss = rivalCaesarsLosses(native(state,name,'d'))
       for (let i = 1; i <= loss; i++) {
         const key = 'loss-'+name+'-'+i
         const options = eventSpaceOptions(state,id,faction,side,key,input)

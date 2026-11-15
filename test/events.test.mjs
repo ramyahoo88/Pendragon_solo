@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { opening, availability, boardTotals, totalProsperity, validatePosition } from '../src/position.mjs'
+import { opening, availability, boardTotals, clone, totalProsperity, validatePosition } from '../src/position.mjs'
 import { applyStilichoRecovery, botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent, stilichoRecoveryChoices } from '../src/events.mjs'
 import { runBattle } from '../src/battle.mjs'
 
@@ -222,6 +222,97 @@ test('Rival Caesars requires both adjacent half-losses and keeps Forts behind Tr
   assert.equal(game.land.Regni.sites[0].piece,'fort')
   assert.equal(game.pools.casualties,2)
   validatePosition(game)
+})
+
+test('Shaded Rival Caesars rounds each odd Region up and explains the loss calculation', () => {
+  const game = opening(995066,{seat:'s'})
+  game.land.Carvetii.units.cav[0] -= 2
+  for (const name of ['Atrebates','Regni']) game.land[name].units.cav = [2,0]
+  const input = {pair:'Atrebates/Regni','loss-Atrebates-1':'cav','loss-Regni-1':'cav'}
+  const {summary} = eventChoices(game,66,'s','shaded',input)
+  assert.match(summary,/Atrebates · 3 Dux pieces → 2 losses/)
+  assert.match(summary,/Regni · 3 Dux pieces → 2 losses/)
+  assert.throws(()=>runEvent(game,66,'s','shaded',input),/each required/)
+  const detail = runEvent(game,66,'s','shaded',{...input,'loss-Atrebates-2':'cav','loss-Regni-2':'cav'})
+  assert.match(detail,/4 Dux pieces lost/)
+  assert.equal(game.pools.casualties,4)
+  for (const name of ['Atrebates','Regni']) assert.equal(game.land[name].sites[0].piece,'fort')
+  validatePosition(game)
+})
+
+function tintagelPosition(seat = 'c') {
+  const game = opening(995032,{seat})
+  game.land.Dobunni.units.mil[0] += availability(game).mil
+  return game
+}
+const tintagelInput = {space:'Dumnonii',site:'1'}
+const tintagelDonor = slot => 'event-recycle-Dumnonii-mil-'+slot
+
+test('Tintagel can reuse two Militia from one space without releasing boxed Comitates', () => {
+  const game = tintagelPosition()
+  const {fields} = eventChoices(game,32,'c','unshaded',tintagelInput)
+  assert.equal(fields.filter(field=>field.name.startsWith('event-recycle-')).length,2)
+  assert.ok(fields.find(field=>field.name===tintagelDonor(1)).options.some(option=>option.value==='Dobunni'))
+  const detail = runEvent(game,32,'c','unshaded',{...tintagelInput,[tintagelDonor(1)]:'Dobunni',[tintagelDonor(2)]:'Dobunni'})
+  assert.equal(game.land.Dumnonii.sites[1].piece,'hill')
+  assert.equal(game.land.Dumnonii.units.mil[0],3)
+  assert.equal(game.land.Dobunni.units.mil[0],6)
+  assert.equal(game.pools.notYet,15)
+  assert.equal(game.land.Dumnonii.units.com[0],0)
+  assert.match(detail,/2 of 2 Militia placed/)
+  assert.match(detail,/0 of 2 Comitates placed.*15 Comitates remain Not Yet in Play/)
+  validatePosition(game)
+})
+
+test('Tintagel uses Available Militia before asking for one optional donor', () => {
+  const game = tintagelPosition()
+  game.land.Dobunni.units.mil[0]--
+  const reused = clone(game)
+  assert.equal(eventChoices(game,32,'c','unshaded',tintagelInput).fields.filter(field=>field.name.startsWith('event-recycle-')).length,1)
+  const detail = runEvent(game,32,'c','unshaded',tintagelInput)
+  assert.equal(game.land.Dumnonii.units.mil[0],2)
+  assert.equal(game.land.Dobunni.units.mil[0],7)
+  assert.match(detail,/1 of 2 Militia placed.*Available Militia supply exhausted/)
+  runEvent(reused,32,'c','unshaded',{...tintagelInput,[tintagelDonor(1)]:'Dobunni'})
+  assert.equal(reused.land.Dumnonii.units.mil[0],3)
+  assert.equal(reused.land.Dobunni.units.mil[0],6)
+  validatePosition(game)
+  validatePosition(reused)
+})
+
+test('Tintagel rejects overdrawn donors atomically and keeps bot and cross-faction placement stock-only', () => {
+  const game = tintagelPosition()
+  const before = clone(game)
+  assert.throws(()=>runEvent(game,32,'c','unshaded',{
+    ...tintagelInput,[tintagelDonor(1)]:'Regni',[tintagelDonor(2)]:'Regni',
+  }),/Choose no more Militia than Regni has/)
+  assert.deepEqual(game,before)
+  for (const [seat,faction] of [['d','c'],['d','d']]) {
+    const game = tintagelPosition(seat)
+    const input = {...tintagelInput,[tintagelDonor(1)]:'Dobunni'}
+    assert.ok(eventChoices(game,32,faction,'unshaded',input).fields.every(field=>!field.name.startsWith('event-recycle-')))
+    runEvent(game,32,faction,'unshaded',input)
+    assert.equal(game.land.Dumnonii.units.mil[0],1)
+    assert.equal(game.land.Dobunni.units.mil[0],8)
+    validatePosition(game)
+  }
+})
+
+test('Scotti Event placements allow native donors and exclude Scotti Foederati', () => {
+  for (const [id,name] of [[32,'Dumnonii'],[62,'Demetae'],[71,'Dumnonii']]) {
+    const game = opening(995062,{seat:'s'})
+    game.land.Dobunni.units.sw = [11,0]
+    game.land.Carvetii.units.dsw = [1,0]
+    const key = `event-recycle-${name}-sw-1`
+    const input = {space:name,site:'1',[key]:'Dobunni'}
+    const {fields} = eventChoices(game,id,'s','shaded',input)
+    assert.deepEqual(fields.find(field=>field.name===key).options.map(option=>option.value),['','Dobunni'])
+    runEvent(game,id,'s','shaded',input)
+    assert.equal(game.land[name].units.sw[0],1)
+    assert.equal(game.land.Dobunni.units.sw[0],10)
+    assert.equal(game.land.Carvetii.units.dsw[0],1)
+    validatePosition(game)
+  }
 })
 
 test('Adventus Saxonum releases both colors of Saxon Foederati and preserves assigned Plunder', () => {

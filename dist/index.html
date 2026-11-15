@@ -188,7 +188,7 @@ legend{padding:0 5px;color:var(--muted);font-size:12px;font-weight:650}
 const modules = {"data":{},"cards":{},"scenarios":{},"position":{},"sequence":{},"battle":{},"commands":{},"operations":{},"grants":{},"epoch-economy":{},"events":{},"event-policy":{},"bots":{},"action-resolution":{},"session":{},"ui":{}}
 ;
 (() => {
-const VERSION = '0.3.9'
+const VERSION = '0.3.10'
 const SCHEMA = 1
 const EDITION = 'GMT Living Rules · November 2023'
 const SCENARIO = 'Barbarian Conspiracy'
@@ -4868,7 +4868,7 @@ Object.assign(modules["epoch-economy"],{epochChoices,runEpochEconomy})
 })()
 ;
 (() => {
-const { BY_NAME, GROUPS, NAMES, RANDOM_SPACES, REGIONS, SEAS } = modules["data"]
+const { BY_NAME, GROUP, GROUPS, NAMES, RANDOM_SPACES, REGIONS, SEAS } = modules["data"]
 const { printedPopulation } = modules["scenarios"]
 const { battleEnemies } = modules["battle"]
 const { annonaChoices, planAnnona, resolveAnnona, resolveImperium } = modules["sequence"]
@@ -4951,6 +4951,51 @@ const validInputNumber = (input,key,min,max,defaultValue = 0) => {
   const answer = input[key] === undefined || input[key] === '' ? defaultValue : Number(input[key])
   ensure(Number.isInteger(answer) && min <= answer && answer <= max,'Invalid quantity for '+key+'.')
   return answer
+}
+
+function eventUnitPlacement(state,faction,destination,group,requested,input) {
+  const { owner,piece } = GROUP[group]
+  const label = groupLabel(group)
+  const available = Math.min(requested,availability(state)[piece])
+  const shortfall = requested-available
+  const sources = shortfall && owner === faction && isHumanFaction(state,faction)
+    ? REGIONS.filter(({name}) => name !== destination && on(state.land[name],group))
+    : []
+  const donors = sources.map(({name}) => option(name,`${name} · ${on(state.land[name],group)} here`))
+  const slots = Math.min(shortfall,sum(sources.map(({name}) => on(state.land[name],group))))
+  const fields = Array.from({length:slots},(_,index) =>
+    selectField(`event-recycle-${destination}-${group}-${index+1}`,
+      `Reuse ${label}${slots > 1 ? ' '+(index+1) : ''} from`,[option('','Leave unplaced'),...donors]))
+  return {
+    fields,
+    check() {
+      const removals = new Map()
+      for (const field of fields) {
+        const origin = defaultChoice(input,field.name,field.options)
+        if (!origin) continue
+        const count = (removals.get(origin) ?? 0)+1
+        ensure(count <= on(state.land[origin],group),`Choose no more ${label} than ${origin} has to reuse.`)
+        removals.set(origin,count)
+      }
+      return removals
+    },
+    place(removals) {
+      for (const [origin,count] of removals) removeUnit(state,origin,group,count)
+      const placed = available+sum([...removals.values()])
+      state.land[destination].units[group][0] += placed
+      const details = [`${placed} of ${requested} ${label} placed in ${destination}.`]
+      for (const [origin,count] of removals) details.push(`Reused ${count} ${label} from ${origin}.`)
+      if (placed < requested) {
+        details.push(`Available ${label} supply exhausted.`)
+        if (group === 'com' && state.pools.notYet) details.push(`${state.pools.notYet} Comitates remain Not Yet in Play.`)
+      }
+      return details.join(' ')
+    },
+  }
+}
+
+function eventHoldResult(placed,piece,name) {
+  return placed ? `${holdNames[piece]} placed in ${name}.` : `No Available ${holdNames[piece]} to place in ${name}.`
 }
 
 function eventPlaceList(state,input,names,maximum,{minimum = Math.min(names.length,maximum),prefix = 'space',label = 'Region'} = {}) {
@@ -5523,14 +5568,14 @@ function resolveBaseEvent(state,id,faction,side,input) {
       const names = eligibleRegions(state,(_,name) => BY_NAME[name].terrain === 'Hills' && BY_NAME[name].seas.includes('hib'))
       const name = input.space ?? names[0]
       const piece = unshaded ? 'hill' : 'ss'
+      const groups = unshaded ? [['mil',2],['com',2]] : [['sw',3]]
+      const units = names.includes(name) ? groups.map(([key,count]) => eventUnitPlacement(state,faction,name,key,count,input)) : []
       const placement = mandatorySpace(state,input,names,'Select a Hills Region on the Hibernicus coast for the new forces.',name => {
+        const donors = units.map(placement => placement.check())
         const hold = placeEventHold(state,name,piece,input,'site')
-        const space = state.land[name]
-        const groups = unshaded ? [['mil',2],['com',2]] : [['sw',3]]
-        for (const [key,value] of groups) space.units[key][0] += Math.min(value,availability(state)[key])
-        return `Place available forces in ${name}${hold ? ' with a '+holdNames[piece] : ''}.`
+        return [eventHoldResult(hold,piece,name),...units.map((placement,index) => placement.place(donors[index]))].join(' ')
       })
-      if (names.includes(name)) placement.fields.push(...holdField(state,name,'site',piece))
+      if (names.includes(name)) placement.fields.push(...holdField(state,name,'site',piece),...units.flatMap(placement => placement.fields))
       return placement
     }
     case 35: return populationEvents(state,id,side,input)
@@ -5597,7 +5642,7 @@ function resolveBaseEvent(state,id,faction,side,input) {
       })
     case 61:
       return unshaded ? trackEvent(state,'wealth',10,'Civitates Wealth') : populationEvents(state,id,side,input)
-    case 62: return eventDyfed(state,input,side)
+    case 62: return eventDyfed(state,faction,input,side)
     case 63: return eventEvangelization(state,input)
     case 66: {
       if (!unshaded) return eventRivalCaesars(state,input)
@@ -5653,15 +5698,15 @@ function resolveBaseEvent(state,id,faction,side,input) {
       const names = eligibleRegions(state,(_,name)=> BY_NAME[name].seas.some(sea=>['hib','sept'].includes(sea)) && candidates(name).length)
       const name = input.space ?? names[0]
       const choices = (names.includes(name) ? candidates(name) : []).map(({site,index})=>option(String(index),site.name))
+      const units = choices.length ? eventUnitPlacement(state,faction,name,'sw',2,input) : null
       const procedure = mandatorySpace(state,input,names,'Place a Scotti Settlement and two Warbands at a vacant coastal Hillfort Site.',name=>{
         const index = Number(defaultChoice(input,'site',choices))
-        const amount = Math.min(2,availability(state).sw)
+        const donors = units.check()
         const placed = availability(state).ss > 0
         if (placed) state.land[name].sites[index] = {piece:'ss',employer:null}
-        state.land[name].units.sw[0] += amount
-        return `Scotti place ${amount} Warbands${placed ? ' and a Settlement' : ''} in ${name}.`
+        return eventHoldResult(placed,'ss',name)+' '+units.place(donors)
       })
-      if (choices.length) procedure.fields.push(selectField('site','Vacant Site',choices,choices[0].value))
+      if (choices.length) procedure.fields.push(selectField('site','Vacant Site',choices,choices[0].value),...units.fields)
       return procedure
     }
     case 74: return revoltAdventus(state,input)
@@ -5693,8 +5738,8 @@ function compiledEvent(state,id,faction,side,input) {
 function eventChoices(state,id,faction,side,input={}) {
   const descriptor = compiledEvent(state,id,faction,side,input)
   if (!descriptor) return null
-  const {help,fields,annona,requests} = descriptor
-  return {help,fields,needsBattle:Boolean(requests?.length),...(annona ? {annona} : {})}
+  const {help,fields,annona,requests,summary} = descriptor
+  return {help,fields,needsBattle:Boolean(requests?.length),...(annona ? {annona} : {}),...(summary ? {summary} : {})}
 }
 const canCalculateEvent = (state,id,faction,side) => Boolean(compiledEvent(state,id,faction,side,{}))
 function runEvent(state,id,faction,side,input={},roll) {
@@ -6224,15 +6269,17 @@ function eventHengest(state,input,side) {
     return `${NAMES[emp]} Foederati are released and Militia removed in ${name}.`
   },candidates.length?[selectField('group','Region and employer',candidates,candidates[0].value)]:[])
 }
-function eventDyfed(state,input,side) {
+function eventDyfed(state,faction,input,side) {
   const name = 'Demetae'
   const space = state.land[name]
-  if(side==='shaded') return perform('Place Scotti forces in Demetae.',()=>{
-    const placed = placeEventHold(state,name,'ss',input,'site')
-    const warbands = Math.min(4,availability(state).sw)
-    space.units.sw[0] += warbands
-    return `${warbands} Scotti Warbands${placed ? ' and a Settlement' : ''} placed in Demetae.`
-  },holdField(state,name,'site','ss'))
+  if(side==='shaded') {
+    const units = eventUnitPlacement(state,faction,name,'sw',4,input)
+    return perform('Place Scotti forces in Demetae.',()=>{
+      const donors = units.check()
+      const placed = placeEventHold(state,name,'ss',input,'site')
+      return eventHoldResult(placed,'ss',name)+' '+units.place(donors)
+    },[...holdField(state,name,'site','ss'),...units.fields])
+  }
   const settlements = space.sites.flatMap((site,index)=>site?.piece==='ss' && !site.employer ? [option(String(index),BY_NAME[name].sites[index].name)]:[])
   const amount = on(space,'sw')
   const fields = [...comitatesChoice(state,amount)]
@@ -6361,6 +6408,8 @@ function eventRomanitas(state,input,side) {
   removal.fields.push(...fields)
   return removal
 }
+const rivalCaesarsLosses = pieces => Math.ceil(pieces/2)
+
 function eventRivalCaesars(state,input) {
   const eligible = eligibleRegions(state,space=>piecesByOwner(space).d)
   const pairKeys = eligible.flatMap((a,i)=>eligible.slice(i+1).filter(b=>BY_NAME[a].adj.includes(b)).map(b=>a+'/'+b))
@@ -6368,6 +6417,12 @@ function eventRivalCaesars(state,input) {
   const selected = input.pair ?? pairs[0]?.value
   const picks = pairKeys.includes(selected) ? selected.split('/') : []
   const fields = pairs.length ? [selectField('pair','Adjacent Regions',pairs,pairs[0].value)] : []
+  const breakdown = picks.map(name => {
+    const pieces = piecesByOwner(state.land[name]).d
+    return {name,pieces,count:rivalCaesarsLosses(pieces)}
+  })
+  const calculation = breakdown.map(({name,pieces,count}) =>
+    `${name} · ${pieces} Dux ${pieces === 1 ? 'piece' : 'pieces'} → ${count} ${count === 1 ? 'loss' : 'losses'}.`).join(' ')
   function removalMenu(board,name) {
     const space = board.land[name]
     return [
@@ -6382,10 +6437,8 @@ function eventRivalCaesars(state,input) {
     if(key.startsWith('site')) board.land[name].sites[Number(key.slice(4))] = null
     else removeUnit(board,name,key,1,key==='cav'?'casualties':null)
   }
-  let required = 0
-  for(const name of picks) {
-    const count = Math.ceil(piecesByOwner(state.land[name]).d/2)
-    required += count
+  const required = sum(breakdown.map(({count}) => count))
+  for(const {name,count} of breakdown) {
     for(let i=1;i<=count;i++) {
       const key = 'loss-'+name+'-'+i
       const menu = removalMenu(draft,name)
@@ -6395,16 +6448,18 @@ function eventRivalCaesars(state,input) {
       apply(draft,name,input[key])
     }
   }
-  return perform('Choose two adjacent Dux Regions, then remove half their Dux pieces rounded up. Forts are last.',()=>{
+  const help = 'Remove half the Dux pieces in each selected Region, rounded up. Forts are last.'
+  const event = perform(help,()=>{
     if(!pairs.length) return 'No adjacent Dux Regions.'
     defaultChoice(input,'pair',pairs)
     ensure(removals.length===required,'Choose each required Dux loss in order.')
     for(const [name,key] of removals) apply(state,name,key)
-    return `${required} Dux pieces lost in ${picks.join(' and ')}.`
+    return `${required} Dux pieces lost. ${calculation}`
   },fields)
+  return {...event,summary:calculation}
 }
 
-Object.assign(modules["events"],{eventSides,eventChoices,canCalculateEvent,runEvent,eventBattleRequests,stilichoRecoveryChoices,applyStilichoRecovery,tribalWarOptions,takeTribalPiece,botEventInput})
+Object.assign(modules["events"],{eventSides,eventChoices,canCalculateEvent,runEvent,eventBattleRequests,stilichoRecoveryChoices,applyStilichoRecovery,tribalWarOptions,takeTribalPiece,botEventInput,rivalCaesarsLosses})
 })()
 ;
 (() => {
@@ -6854,7 +6909,7 @@ const { BY_NAME, GROUPS, NAMES, RANDOM_SPACES, REGIONS, ROADS, SEAS } = modules[
 const { card } = modules["cards"]
 const { printedPopulation, scenarioInfo } = modules["scenarios"]
 const { battleEnemies, battleForecast, battleTargets, withdrawalCapacity } = modules["battle"]
-const { botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent } = modules["events"]
+const { botEventInput, eventBattleRequests, eventChoices, eventSides, rivalCaesarsLosses, runEvent } = modules["events"]
 const { hasEventEffect, selectBotEventInput } = modules["event-policy"]
 const { grantRule, setGrantMarkers } = modules["grants"]
 const { civitatesMusterCapacity, runCommand, runCommandFeat, settleSpaceLimit } = modules["commands"]
@@ -8685,13 +8740,14 @@ function verifiedEventInput(state,id,faction,side,roll) {
   if (id === 66 && side === 'shaded') {
     const candidates = eventSpaceOptions(state,id,faction,side,'pair').map(pair => {
       const [name,adjacent] = pair.split('/')
-      return {name,pair,rank:[Math.ceil(native(state,name,'d')/2)+Math.ceil(native(state,adjacent,'d')/2)]}
+      const losses = rivalCaesarsLosses(native(state,name,'d'))+rivalCaesarsLosses(native(state,adjacent,'d'))
+      return {name,pair,rank:[losses]}
     })
     const chosen = pickBest(candidates,roll,card(id).title)
     if (!chosen) return null
     const input = {pair:chosen.pair}
     for (const name of chosen.pair.split('/')) {
-      const loss = Math.ceil(native(state,name,'d')/2)
+      const loss = rivalCaesarsLosses(native(state,name,'d'))
       for (let i = 1; i <= loss; i++) {
         const key = 'loss-'+name+'-'+i
         const options = eventSpaceOptions(state,id,faction,side,key,input)
@@ -10198,6 +10254,7 @@ function dynamicFields(descriptor,input) {
   const ordinary = fields.filter(field => !field.advanced)
   const advanced = fields.filter(field => field.advanced)
   return `<p class="muted">${clean(descriptor.help)}</p>
+    ${descriptor.summary ? '<p>'+clean(descriptor.summary)+'</p>' : ''}
     ${ordinary.length ? '<div class="fields">'+ordinary.map(spec => descriptorField(spec,input)).join('')+'</div>' : ''}
     ${advanced.length ? '<details><summary>Choose spaces and pieces</summary><div class="fields">'+advanced.map(spec => descriptorField(spec,input)).join('')+'</div></details>' : ''}`
 }
@@ -10986,7 +11043,7 @@ document.addEventListener('change',async event => {
       if (advanced && refocused?.closest('details')) refocused.closest('details').open = true
       refocused?.focus({preventScroll:true})
     }
-    if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !target.name.startsWith('eligible') && !/^(rows|feats)\d+-/.test(target.name)))) {
+    if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !/^(eligible|event-recycle-|(rows|feats)\d+-)/.test(target.name)))) {
       if (['option','command','feat','side','grant','grantFeat'].includes(target.name)) {
         for (const key of Object.keys(session.work.input)) if (key.startsWith('rows') || key.startsWith('feats')) delete session.work.input[key]
         delete session.work.input.featTiming
