@@ -1083,7 +1083,8 @@ function bot(choices = {}) {
   proposal = proposeBot(state(),[],choices)
   if (proposal.mode === 'consent') {
     modal(clean(proposal.title),`<h3>${clean(proposal.question)}</h3><p class="muted">${clean(proposal.description)}</p>`,
-      button('Decline','bot-consent','ghost','no')+button('Allow','bot-consent','primary','yes'),'consent')
+      button('Decline','bot-consent','ghost','no')+button('Allow','bot-consent','primary','yes'),
+      'consent',{key:proposal.key,choices})
   } else if (proposal.mode === 'auto') {
     showPreview({ ...proposal,label:NAMES[faction]+' · '+proposal.title },'bot')
   } else if (proposal.mode === 'battle') {
@@ -1427,7 +1428,7 @@ function handleAction(action,value) {
     case 'choose': clickTurn(action,value); return
     case 'bot': prepareAction(() => clickTurn('bot')); return
     case 'bot-consent': {
-      const choices = {blueConsent:value === 'yes'}
+      const choices = {...dialogData.choices,[dialogData.key]:value === 'yes'}
       prepareAction(() => bot(choices),choices)
       return
     }

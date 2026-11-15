@@ -1,4 +1,4 @@
-# Pendragon Solo Companion v0.3.7
+# Pendragon Solo Companion v0.3.8
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
@@ -58,11 +58,15 @@ Non-player Withdrawal uses friendly placement order from the November 2023 Livin
 
 The scripted tests cover the four factions' Shield Event and Pass checks, the Dux Intercept-to-Battle fallback, and the Saxon Return action when Settle adds nothing. They also cover split cube quarters, Battle Feat timing, recycling, Raider Evasion, Plunder priorities, Siege, and save recovery. The separate v0.3.6 chart harness matched all 4,368 Raider Assault comparisons, including the two Hillfort modifiers.
 
+The v0.3.8 tests cover the Civitates' adjacent Reinforce move after local Muster, including Dux consent, Plunder, failed rolls, and the limit on Resources. They also check shaded Thanet's two Settle spaces before or after March and the Saxon March priority for enabling a second Settlement in a Region the Saxons already Control.
+
 Each campaign sweep runs every combination of scenario, seat, and difficulty with two simple policies. The first 96 games use human Pass turns. The other 96 use Raid and Return for the Barbarians, Trade for Civitates, and Train and Intercept for Dux. The sweep accepts `--tactics=first` or `--tactics=last` to exercise choices other than the defaults. If a planner fails, the summary includes the path to an importable save.
 
 All 768 games across four v0.3.6 sweeps reached scoring. Seed blocks 925000 and 938000 used default tactics. Seed block 927000 used the last option and 929000 used the first. They completed 24,619 bot turns and 6,348 tactical choices.
 
 Both v0.3.7 sweeps reached scoring in all 384 campaigns. Seed block 925000 used default tactics and 942000 used the last option.
+
+All 220 tests passed for v0.3.8. Seed block 958000 reached scoring in all 192 campaigns using the first tactical choice. The active policy allowed Dux Troops to Reinforce when asked. The Pass policy declined.
 
 ## References
 

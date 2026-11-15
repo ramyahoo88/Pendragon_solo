@@ -1,4 +1,4 @@
-export const VERSION = '0.3.7'
+export const VERSION = '0.3.8'
 export const SCHEMA = 1
 export const EDITION = 'GMT Living Rules · November 2023'
 export const SCENARIO = 'Barbarian Conspiracy'

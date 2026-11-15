@@ -137,7 +137,7 @@ function run(settings,seed,active,counts) {
             add(counts.playerCommands,command)
           } else finishAction(game,'pass','Pass')
         } else {
-          const proposal = proposeBot(game,[],{blueConsent:false})
+          const proposal = proposeBot(game,[],{blueConsent:false,reinforceConsent:active})
           add(counts.botModes,proposal.mode)
           if (proposal.option === 'event' || proposal.mode === 'player-event') add(counts.botEvents,game.current)
           if (proposal.mode === 'auto') game = proposal.after

@@ -17,7 +17,8 @@ const isCity = name => BY_NAME[name].terrain === 'City'
 const siteCount = (space,piece) => space.sites.filter(site => site?.piece === piece).length
 const hasDuxForts = space => siteCount(space,'fort') > 0
 const styleMarker = (state,id,side) => state.markers[id]?.side === side
-const settleTwice = (state,faction) => styleMarker(state,45,'shaded') && (state.markers[45].faction ?? 'x') === faction
+export const settleSpaceLimit = (state,faction) =>
+  styleMarker(state,45,'shaded') && (state.markers[45].faction ?? 'x') === faction ? 2 : 1
 const militiaMultiplier = state => state.markers[4] ? 2 : 1
 
 function canShareBlue(state) {
@@ -216,7 +217,7 @@ export function commandFeatFields(state,faction,command,feat,options={}) {
     case 'Rule':
       return rowSet([spaceField(),choose('mode','Rule',[['wealth','Convert Resources to Wealth'],['prestige','Reduce Dux Prestige'],['population','Settle a Refugee']],'wealth',true)],1,3,'Choose a mode in each of up to three spaces with Briton Control. Civitates Plunder there is converted to Wealth first.')
     case 'Settle':
-      return rowSet([spaceField(),choose('mode','After any Raider rolls',[['none','Raider rolls only'],['recruit','Pay 3 Renown to recruit'],['settlement','Found a Settlement'],...(faction === 'x' ? [['population','Add Population'],['both','Found a Settlement and add Population']] : [])],'none',true),siteField('site','Settlement site'),qty('bands','Warbands to recruit (blank = maximum)',25,0,''),line('raiders','Returning Raiders for this space','Blank = automatic; e.g. Dobunni=2, Parisi')],1,settleTwice(state,faction) ? 2 : 1,'Settle where your pieces outnumber everyone else. For Thanet, count each Raider once. Use comma-separated origins, optionally with =count when splitting an origin.')
+      return rowSet([spaceField(),choose('mode','After any Raider rolls',[['none','Raider rolls only'],['recruit','Pay 3 Renown to recruit'],['settlement','Found a Settlement'],...(faction === 'x' ? [['population','Add Population'],['both','Found a Settlement and add Population']] : [])],'none',true),siteField('site','Settlement site'),qty('bands','Warbands to recruit (blank = maximum)',25,0,''),line('raiders','Returning Raiders for this space','Blank = automatic; e.g. Dobunni=2, Parisi')],1,settleSpaceLimit(state,faction),'Settle where your pieces outnumber everyone else. For Thanet, count each Raider once. Use comma-separated origins, optionally with =count when splitting an origin.')
     case 'Entreat':
       return rowSet([spaceField('Hills Region',spaces(name => BY_NAME[name].terrain === 'Hills')),box('settlement','Replace a Hillfort with a Settlement'),siteField('site','Hillfort site'),qty('bands','Militia to replace',2)],1,1,'Pay 4 Renown to replace pieces in a Hills Region with a Scotti Warband. Pieces without an available replacement stay in place.')
     default:

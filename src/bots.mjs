@@ -5,7 +5,7 @@ import { battleEnemies, battleForecast, battleTargets, withdrawalCapacity } from
 import { botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent } from './events.mjs'
 import { hasEventEffect, selectBotEventInput } from './event-policy.mjs'
 import { grantRule, setGrantMarkers } from './grants.mjs'
-import { runCommand, runCommandFeat } from './commands.mjs'
+import { runCommand, runCommandFeat, settleSpaceLimit } from './commands.mjs'
 import { botForcesRaidBattle, raidBonusPlunder, raidResponders } from './operations.mjs'
 import { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, makeRoller as positionRoller, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } from './position.mjs'
 import { actionOptions, activeFaction, finishAction, isPivotalCard, pivotalOptions, resolveImperium } from './sequence.mjs'
@@ -74,6 +74,10 @@ const native = (state, name, faction) => piecesByOwner(state.land[name])[faction
 const localOrAdjacent = name => [name,...BY_NAME[name].adj]
 const ownedStrongholds = (space,faction) => space.sites.filter(site => site && toOwner(site.piece,site.employer) === faction)
 const nativeSettlements = (space,faction) => space.sites.filter(site => site?.piece === faction+'s' && !site.employer).length
+const hasSettleMajority = (space,faction) => {
+  const counts = piecesByOwner(space)
+  return counts[faction]*2 > sum(Object.values(counts))
+}
 const availableSite = (space,name,wanted) => {
   const preferred = BY_NAME[name].sites.findIndex((slot,i) => slot.type === wanted && !space.sites[i])
   return preferred < 0 ? space.sites.indexOf(null) : preferred
@@ -183,14 +187,13 @@ export function barbarianReturn(state,faction,roll,{allowedFeat = true, oneSpace
   }
   const choices = []
   const counted = new Set()
-  const limit = faction === 'x' && effectiveMarker(state,45,'shaded','x') ? 2 : 1
+  const limit = settleSpaceLimit(state,faction)
   const controlledAtOutset = new Set(REGIONS.filter(({name}) => control(state,name) === faction).map(r => r.name))
   if (allowedFeat) {
     for (let round = 0; round < limit; round++) {
       const candidates = REGIONS.filter(({name}) => !choices.some(choice => choice.name === name)).flatMap(({name,terrain}) => {
         const space = state.land[name]
-        const counts = piecesByOwner(space)
-        if (counts[faction] * 2 <= sum(Object.values(counts))) return []
+        if (!hasSettleMajority(space,faction)) return []
         const raiderOrigins = localOrAdjacent(name).filter(source => !counted.has(source) && on(state.land[source],raider) && (!oneSpace || returnedFrom.has(source)))
         const raiders = sum(raiderOrigins.map(source => on(state.land[source],raider)))
         const expectedReturn = new Set([...returnedFrom,...raiderOrigins])
@@ -394,7 +397,14 @@ function threateningHumanControl(state,owner) {
   return (state.humans || [state.human]).some(faction => ownsControlId(owner,faction) &&
     (margins[faction] ?? ranks[faction].margin) > 0)
 }
-function barbarianMarchChoices(state,faction,unmoved,seaUsed,priorSettle) {
+function couldPlaceSettlement(state,name,faction,arrivals) {
+  const space = clone(state.land[name])
+  space.units[faction+'w'][0] += arrivals
+  if (!hasSettleMajority(space,faction)) return false
+  const projected = {...state,land:{...state.land,[name]:space}}
+  return settlementChange(projected,name,faction,true).includes('place one Settlement')
+}
+function barbarianMarchChoices(state,faction,unmoved,seaUsed,canSettleAfter) {
   const band = faction+'w'
   const saxon = faction === 'x'
   const candidates = []
@@ -430,10 +440,11 @@ function barbarianMarchChoices(state,faction,unmoved,seaUsed,priorSettle) {
     const amount = saxon ? need : adjacentCount+extra
     const end = majorityControlAfter(state,name,faction,band,amount)
     const removed = enemyControlOwner(old,faction) && old !== end
-    const possibleSettle = !priorSettle && availability(state)[faction+'s'] > 0 &&
-      space.sites.includes(null) && on(space,band)+amount >= (saxon ? 4 : 3) &&
-      stackingGain(state,name,faction,target => { target.units[band][0] += amount-2; target.sites[target.sites.indexOf(null)] = {piece:faction+'s',employer:null} }) > 0
-    if (!removed && !possibleSettle) continue
+    if (!removed) {
+      const enablesSettlement = canSettleAfter && space.sites.includes(null) &&
+        couldPlaceSettlement(state,name,faction,amount) && !couldPlaceSettlement(state,name,faction,0)
+      if (!enablesSettlement) continue
+    }
     candidates.push({
       name,stock:sources,usingSea,need,amount,
       rank:[removed && threateningHumanControl(state,old) ? space.pop : 0,+(terrain === (saxon ? 'Fens' : 'Hills'))],
@@ -443,12 +454,11 @@ function barbarianMarchChoices(state,faction,unmoved,seaUsed,priorSettle) {
 }
 function controlledAt(state,name,faction) { return control(state,name) === faction }
 
-function settleWithoutReturn(state,faction,roll,{needSettlement = false} = {}) {
+function settleWithoutReturnChoices(state,faction,needSettlement,selected) {
   const candidates = []
   for (const {name,terrain} of REGIONS) {
     const before = state.land[name]
-    const counts = piecesByOwner(before)
-    if (counts[faction]*2 <= sum(Object.values(counts))) continue
+    if (selected?.has(name) || !hasSettleMajority(before,faction)) continue
     const estimate = clone(state)
     const change = settlementChange(estimate,name,faction,true)
     if (needSettlement && !change.includes('place one Settlement')) continue
@@ -462,32 +472,35 @@ function settleWithoutReturn(state,faction,roll,{needSettlement = false} = {}) {
         : [+change.includes('place one Settlement'),bought,+(terrain === 'Hills')],
     })
   }
-  if (!candidates.length) return null
-  if (!roll) return candidates[0]
-  const pick = pickBest(candidates,roll,`${NAMES[faction]} Settle target`)
-  const {name} = pick
-  if (pick.kind === 'change') return name+' · '+settlementChange(state,name,faction,true).join(', ')
-  return `${name} · pay 3 Renown to place ${buySettledWarbands(state,name,faction,pick.controlled)} Warbands`
+  return candidates
 }
-function planBarbarianMarch(state,faction,roll,{oneSpace,allowedFeat}) {
-  const draft = clone(state)
+function settleWithoutReturn(state,faction,roll,needSettlement = false) {
+  const selected = new Set()
+  const notes = []
+  while (selected.size < settleSpaceLimit(state,faction)) {
+    const candidates = settleWithoutReturnChoices(state,faction,needSettlement,selected)
+    const pick = pickBest(candidates,roll,`${NAMES[faction]} Settle target`)
+    if (!pick) break
+    const {name,kind,controlled} = pick
+    selected.add(name)
+    if (kind === 'change') {
+      notes.push(name+' · '+settlementChange(state,name,faction,true).join(', '))
+    } else {
+      const count = buySettledWarbands(state,name,faction,controlled)
+      notes.push(`${name} · pay 3 Renown to place ${count} Warbands`)
+    }
+  }
+  return notes
+}
+function marchBarbarianWarbands(draft,faction,roll,{oneSpace,canSettleAfter}) {
   const band = faction+'w'
   const saxon = faction === 'x'
   const available = Object.fromEntries(REGIONS.map(({name}) => [name,on(draft.land[name],band)]))
   const notes = []
   const usedDestinations = new Set()
   let usedSea = false
-  let settling = null
-  if (allowedFeat && settleWithoutReturn(draft,faction,null,{needSettlement:!saxon})) {
-    // Keep Settle out of the live draft until the March is known to have a destination.
-    if (barbarianMarchChoices(draft,faction,available,false,true).length) {
-      settling = settleWithoutReturn(draft,faction,roll,{needSettlement:!saxon})
-      for (const name of Object.keys(available)) available[name] = on(draft.land[name],band)
-      notes.push(settling)
-    }
-  }
   while (draft.tracks[faction] > 0 && (!oneSpace || !usedDestinations.size)) {
-    const candidates = barbarianMarchChoices(draft,faction,available,usedSea,settling || !allowedFeat)
+    const candidates = barbarianMarchChoices(draft,faction,available,usedSea,canSettleAfter)
       .filter(candidate => !usedDestinations.has(candidate.name))
     const movable = pickBest(candidates,roll,`${NAMES[faction]} March destination`)
     if (!movable) break
@@ -519,12 +532,28 @@ function planBarbarianMarch(state,faction,roll,{oneSpace,allowedFeat}) {
     usedDestinations.add(movable.name)
     draft.tracks[faction] -= movable.usingSea ? 2 : 1
   }
-  if (!usedDestinations.size) return null
-  if (allowedFeat && !settling) {
-    settling = settleWithoutReturn(draft,faction,roll)
-    if (settling) notes.push(settling)
+  return notes
+}
+function planBarbarianMarch(state,faction,roll,{oneSpace,allowedFeat}) {
+  if (allowedFeat) {
+    // A Settle before March is provisional until Warbands can still move.
+    const settled = clone(state)
+    const settling = settleWithoutReturn(settled,faction,roll,faction === 's')
+    if (settling.length) {
+      const march = marchBarbarianWarbands(settled,faction,roll,{oneSpace,canSettleAfter:false})
+      if (march.length) {
+        return {state:settled,title:'March + Settle',desc:[...settling,...march].join('. '),feat:'Settle'}
+      }
+    }
   }
-  return {state:draft,title:`March${settling ? ' + Settle' : ''}`,desc:notes.join('. '),feat:settling ? 'Settle' : null}
+  const draft = clone(state)
+  const march = marchBarbarianWarbands(draft,faction,roll,{oneSpace,canSettleAfter:allowedFeat})
+  if (!march.length) return null
+  const settling = allowedFeat ? settleWithoutReturn(draft,faction,roll) : []
+  return {
+    state:draft,title:settling.length ? 'March + Settle' : 'March',
+    desc:[...march,...settling].join('. '),feat:settling.length ? 'Settle' : null,
+  }
 }
 
 const isBritonFaction = faction => faction === 'd' || faction === 'c'
@@ -542,7 +571,62 @@ function saxonBattleGoal(outcome,{count,mayEvade}) {
   return outcome.destroyed.length > 0 ||
     (count > 0 && !mayEvade && outcome.defenderLosses-outcome.destroyed.length >= count)
 }
-function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enemyFilter,requireDestruction = false,interceptBattles},roll) {
+function reinforceFormation(space,allies) {
+  const order = [
+    allies ? ['cav'] : [],
+    ['com'],
+    allies ? ['dxw','dsw','cxw','csw'] : ['cxw','csw'],
+    ['mil'],
+  ]
+  const troops = []
+  let remaining = 4 // The most that D6 minus two can move.
+  for (const groups of order) {
+    for (const carrying of [false,true]) {
+      for (const key of groups) {
+        const stock = carrying ? loaded(space,key) : on(space,key)-loaded(space,key)
+        const count = Math.min(stock,remaining)
+        if (!count) continue
+        troops.push({key,count,cargo:carrying ? count : 0})
+        remaining -= count
+        if (!remaining) return troops
+      }
+    }
+  }
+  return troops
+}
+function adjacentReinforce(state,requests,roll,reinforceConsent) {
+  if (state.tracks.blue < 2) return null
+  const battleSpaces = requests.map(request => request.name)
+  const candidates = []
+  for (const request of requests) {
+    const destination = request.name
+    const allies = !isFragmentation(state) && request.defender !== 'd' &&
+      (!botHasHuman(state,'d') || reinforceConsent !== false)
+    const origins = BY_NAME[destination].adj.filter(name =>
+      !battleSpaces.includes(name) && friendlyControl(state,name,'c'))
+    if (!origins.length) continue
+    const losses = battleForecast(state,request).defenderLosses
+    for (const name of origins) {
+      const troops = reinforceFormation(state.land[name],allies)
+      if (!troops.length) continue
+      // Give the Feat calculator an ordered formation so a low roll moves
+      // unloaded Troops of the same type before those carrying Plunder.
+      const formation = destination+' '+troops.map(({key,count,cargo}) => `${key}=${count}:${cargo}`).join(' ')
+      const spec = {
+        faction:'c',command:'Battle',feat:'Reinforce',battleSpaces,
+        input:{wealthSpend:0,alliedConsent:allies},
+        rows:[{space:name,mode:'move',formation}],
+      }
+      const estimate = clone(state)
+      runCommandFeat(estimate,spec,() => 6)
+      if (battleForecast(estimate,request).defenderLosses > losses) {
+        candidates.push({name,destination,spec,usesDux:troops.some(({key}) => duxGroups.includes(key)),rank:[]})
+      }
+    }
+  }
+  return pickBest(candidates,roll,'Civitates Reinforce origin')
+}
+function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enemyFilter,requireDestruction = false,interceptBattles,reinforceConsent},roll) {
   const candidates = []
   const militiaRoll = () => roll(6,'Civitates Battle · Plunder threshold')
   let lootThreshold
@@ -714,6 +798,19 @@ function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enem
         state.tracks.blue -= 2
         state.land[request.name].units.mil[0] += count
         notes.push(`${request.name} · pay 2 Resources to muster ${count} reinforcing Militia`)
+        feat = 'Reinforce'
+      }
+      const move = adjacentReinforce(state,requests,roll,reinforceConsent)
+      if (move) {
+        if (move.usesDux && botHasHuman(state,'d') && typeof reinforceConsent !== 'boolean') {
+          return {consent:{
+            mode:'consent',faction,title:'Reinforce',
+            question:'Allow Civitates to move Dux Troops?',
+            description:`Civitates can attempt to Reinforce the Battle in ${move.destination} with Troops from ${move.name} (§4.3.3).`,
+            key:'reinforceConsent',
+          }}
+        }
+        notes.push(`Reinforce toward ${move.destination}. ${runCommandFeat(state,move.spec,roll)}`)
         feat = 'Reinforce'
       }
     }
@@ -2086,6 +2183,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   const dice = []
   const roll = grantRoll ?? makeRoller(draft,dice,scripted)
   const allowance = choices.myrddin ? {oneSpace:false,allowedFeat:true} : botAllowance(state)
+  if (faction === 'c') allowance.reinforceConsent = choices.myrddin ? false : choices.reinforceConsent
   if (faction === 'd' && state.imperium === 'ac' && state.tracks.blue) {
     const edges = scores(state)
     allowance.blueConsent = botHasHuman(state,'c') ? Boolean(choices.blueConsent)
@@ -2116,6 +2214,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const base = clone(draft)
     const chosen = policyBattleRequests(base,faction,{...allowance,interceptBattles},roll)
     if (!chosen) return null
+    if (chosen.consent) return chosen.consent
     const plan = battlePlan(`Battle${chosen.feat ? ' + '+chosen.feat : ''}`,chosen.requests,chosen.notes.join('. '),chosen.feat,base)
     if (interceptBattles) return explain(plan,'8.8.1','Intercept could engage enough Raiders, but would add no movement or Feat. Resolve Battle.')
     const [section,detail] = {
@@ -2245,7 +2344,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   if (hasWarbands && faction === 'x' && allowance.allowedFeat && roll(6,'Saxons March decision') <= 2) {
     const march = planBarbarianMarch(draft,faction,roll,allowance)
     if (march?.feat) return explain(auto('feat',march.title,march.desc,march.state),'8.6.3','The March roll is 1 or 2 and Settle can add a piece or Population.')
-    if (settleWithoutReturn(draft,faction,null)) {
+    if (settleWithoutReturnChoices(draft,faction,false).length) {
       const returning = clone(draft)
       const result = barbarianReturn(returning,faction,roll,{...allowance,forSettle:true})
       if (result?.feat) return explain(auto('feat','Return + '+result.feat,result.notes.join('. '),returning),'8.6.3','Settle can add something without moving Warbands, so Return accompanies it.')
