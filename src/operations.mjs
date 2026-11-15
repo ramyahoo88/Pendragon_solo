@@ -1,7 +1,7 @@
 import { BY_NAME, NAMES, REGIONS, ROADS, SEAS } from './data.mjs'
 import { availability, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, hasStronghold, humanFactions, inRange, isFragmentation, loaded, moveUnits, on, plunderTo, preemption, toOwner, totalProsperity } from './position.mjs'
 import { battleEnemies, battleTargets, raidReactionSafe } from './battle.mjs'
-import { commandEconomy, commandFeatFields, duxPaymentFields, runCommandFeat } from './commands.mjs'
+import { commandEconomy, commandFeatFields, duxPaymentFields, recycleField, runCommandFeat } from './commands.mjs'
 
 const operationTroops = { d:['cav','dxw','dsw'], c:['mil','com','cxw','csw'], x:['xw'], s:['sw'] }
 const pick = (key,label,options,required = true) => ({key,label,type:'select',options:[['','Choose…'],...options],required})
@@ -9,8 +9,8 @@ const check = (key,label) => ({key,label,type:'check',default:false})
 const countField = (key,label,defaultValue = '0') => ({key,label,type:'number',min:0,max:30,default:defaultValue})
 const spaceOption = names => names.map(name => [name,name])
 const selected = value => value === true || ['yes','on','1','true'].includes(value)
-const timedBattleFeat = feat => feat === 'Requisition' || feat === 'Entreat'
-const defaultBattleFeatTiming = (feat,input) => feat === 'Entreat' || selected(input.featBefore) ? 'before' : 'after'
+const timedBattleFeat = feat => ['Requisition','Entreat','Reinforce','Pillage'].includes(feat)
+const defaultBattleFeatTiming = (feat,input) => feat === 'Requisition' && !selected(input.featBefore) ? 'after' : 'before'
 const humanHas = (state,faction) => humanFactions(state).includes(faction)
 const hasSide = (state,id,side) => state.markers[id]?.side === side
 const niallBox = 'niall-box'
@@ -123,30 +123,41 @@ export function militaryFields(state,faction,command,feat,options,input = {}) {
   const cap = options.limited ? 1 : options.spaceLimit ?? REGIONS.length
   if (command === 'Battle') {
     const enemies = options.enemies ?? ['d','c','x','s'].filter(key => key !== faction)
-    const names = (options.reinforceBonus ? REGIONS.filter(({name}) => battleEnemies(state,name,faction).some(owner => enemies.includes(owner))).map(r => r.name) : battleTargets(state,faction))
+    // Reinforce can supply the first acting Troop before a selected Battle.
+    const canReinforce = feat === 'Reinforce' && input.featTiming !== 'after'
+    const names = (canReinforce ? REGIONS.map(({name}) => name) : battleTargets(state,faction))
       .filter(name => (!options.regionsOnly || BY_NAME[name].terrain !== 'City') && battleEnemies(state,name,faction).some(owner => enemies.includes(owner)))
     const base = [pick('space','Battle space',spaceOption(names)),pick('enemy','Defender',enemies.map(key => [key,NAMES[key]]),false),
       ...(['Retaliate','Surprise','Ravage','Ransom'].includes(feat) ? [check('tactic','Use '+feat+' here')] : [])]
-    const controls = feat === 'Reinforce' && !isFragmentation(state) ? [check('alliedConsent','Dux agrees to Reinforce')] : []
+    const featFields = commandFeatFields(state,faction,command,feat,options)
+    const controls = []
     if (timedBattleFeat(feat)) {
       const targets = Math.max(1,Math.min(cap,Number(input.rows) || 1))
       const between = Array.from({length:targets-1},(_,i) => [String(i+1),'After Battle '+(i+1)])
       controls.push({
         key:'featTiming',label:'When to '+feat,type:'select',
         options:[['before','Before the first Battle'],...between,['after','After the last Battle']],
-        default:defaultBattleFeatTiming(feat,input),
+        default:defaultBattleFeatTiming(feat,input),refresh:feat === 'Reinforce',
       })
     }
+    const recycling = recycleField(faction,command,feat)
+    if (feat === 'Reinforce' && featFields) {
+      const count = Math.max(featFields.minRows,Math.min(featFields.maxRows,Number(input.feats ?? featFields.minRows)))
+      const modes = Array.from({length:count},(_,i) => input[`feats${i}-mode`] || 'muster')
+      if (modes.includes('muster')) controls.push(recycling)
+      if (modes.includes('move') && !isFragmentation(state) && humanHas(state,'d')) controls.push(check('alliedConsent','Dux agrees to Reinforce'))
+    } else if (recycling) controls.push(recycling)
     return {
       minRows:1,maxRows:cap,rows:base,controls,
-      featFields: commandFeatFields(state,faction,command,feat,options),
+      featFields,
       help:'Select the Battle spaces. The app steps through tactics, losses, Strongholds, Plunder, and Siege.',
     }
   }
   if (command === 'Intercept' && faction === 'd') {
     const targetNames = REGIONS.filter(region => friendlyControl(state,region.name,'d') && (on(state.land[region.name],'xr') || on(state.land[region.name],'sr'))).map(region => region.name)
     const originNames = REGIONS.filter(region => friendlyControl(state,region.name,'d') && operationTroops.d.some(key => on(state.land[region.name],key))).map(region => region.name)
-    return { minRows:1,maxRows:REGIONS.length, controls:duxPaymentFields(state,options),
+    const recycling = recycleField(faction,command,feat)
+    return { minRows:1,maxRows:REGIONS.length, controls:[...duxPaymentFields(state,options),...(recycling ? [recycling] : [])],
       rows:[pick('space','Intercept target',spaceOption(targetNames)),pick('origin','Move from · optional',spaceOption(originNames),false),
         ...(hasSide(state,60,'unshaded') ? [check('sea','Move by sea')] : []),
         ...(feat === 'Retaliate' ? [check('tactic','Use Retaliate here')] : []),
@@ -214,7 +225,6 @@ export function runMilitary(state,spec,roll,fight,reply) {
   }
   if (command === 'Battle' || command === 'Intercept') {
     if (['Surprise','Retaliate'].includes(feat)) ensure(new Set(rows.filter(row => selected(row.tactic)).map(row => row.space)).size <= 1,feat+' applies in a single space.')
-    if (['Pillage','Reinforce'].includes(feat) && (!options.reinforceBonus || featRows.length)) support()
     if (command === 'Intercept') {
       const origins = [...new Set(rows.map(row => row.origin).filter(Boolean))]
       const payment = commandEconomy(state,faction,options,input)
@@ -249,10 +259,10 @@ export function runMilitary(state,spec,roll,fight,reply) {
     }
     const tacticalSpace = rows.find(row => selected(row.tactic))?.space ?? names[0]
     let featAt = null
-    if (timedBattleFeat(feat)) {
+    if (timedBattleFeat(feat) && (!options.reinforceBonus || featRows.length)) {
       const timing = input.featTiming || defaultBattleFeatTiming(feat,input)
       featAt = timing === 'before' ? 0 : timing === 'after' ? names.length : Number(timing)
-      ensure(inRange(featAt,0,names.length),'Choose when to '+feat+' during the selected Battles.')
+      ensure(timing === 'before' || timing === 'after' || inRange(featAt,1,names.length-1),'Choose when to '+feat+' during the selected Battles.')
       if (featAt === 0) support(input,'before the first Battle')
     }
     for (const [index,name] of names.entries()) {

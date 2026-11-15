@@ -54,6 +54,7 @@ function knownTroop(value) {
 
 function recycleEntries(value,faction,command,feat) {
   if (!value) return []
+  ensure(typeof value === 'string','Enter recycling as a unit, space and count.')
   const permitted = new Set([
     ...(command === 'Train' ? ['cav'] : command === 'Muster' ? ['mil','com'] : feat === 'Reinforce' ? ['mil'] : []),
     ...(feat === 'Invite' ? [faction+'xw',faction+'sw'] : []),
@@ -173,6 +174,18 @@ function rowSet(rows,minRows,maxRows,help) {
   return { rows,minRows,maxRows,help }
 }
 
+export function recycleField(faction,command,feat) {
+  let example
+  if (command === 'Train') example = 'cavalry@Carvetii=2'
+  else if (command === 'Muster' || feat === 'Reinforce') example = 'militia@Dumnonii=1'
+  else if (feat === 'Invite') example = faction+'xw@Dobunni=1'
+  else if (feat === 'Settle' || feat === 'Entreat') example = faction+'w@Dumnonii=1'
+  return example ? {
+    ...line('recycle','Recycle units when supply is exhausted',example),
+    hint:`Optional. Enter up to the number you can spare, for example ${example}. Separate sources with commas. The app uses only what it needs.`,
+  } : null
+}
+
 export function commandFeatFields(state,faction,command,feat,options={}) {
   if (!feat || !featOwners[feat]?.includes(faction) || !FEATS[faction]?.[command]?.includes(feat)) return null
   if ((options.limited || options.free) && options.allowFeat !== true) return null
@@ -186,12 +199,17 @@ export function commandFeatFields(state,faction,command,feat,options={}) {
       return rowSet([spaceField('Region',spaces(name => !isCity(name))),choose('enemy','Stronghold owner to penalize',[['','Automatic if one enemy'],['d','Dux'],['x','Saxons'],['s','Scotti']]),...ownerTroops.c.map(key => qty('loot-'+key,`Plunder on ${groupLabel(key)}`,30,0,''))],1,REGIONS.length,'Pillage in Regions without Briton Control. Leave all Plunder fields blank to fill available carrying capacity in unit order.')
     case 'Reinforce': {
       const groups = [...ownerTroops.c,...(canUseAllies(state,faction) ? ownerTroops.d : [])]
-      return rowSet([
-        spaceField('Reinforce space'),choose('mode','Reinforce',[['muster','Muster Militia here'],['move','Move troops to adjacent Battles']],'muster',true),
+      const movement = [
         choose('destination','Battle destination for moving troops',selectList(spaces())),
         line('formation','Optional movement split','e.g. Dobunni mil=2 com=1:1; Silures cxw=1'),
         ...groups.flatMap(group => [qty(group,groupLabel(group),30,0,''),qty(group+'p',`Plunder on ${groupLabel(group)} (optional)`,30,0,'')]),
-      ],1,REGIONS.length,'Each Reinforce space costs 2 Resources. Muster in a Battle space or roll D6−2 to send troops to adjacent Battle spaces. Counts indicate preference and are capped by the roll.')
+      ]
+      return rowSet([
+        spaceField('Reinforce space'),{...choose('mode','Reinforce',[['muster','Muster Militia here'],['move','Move troops to adjacent Battles']],'muster',true),refresh:true},
+        {...qty('mil',`Militia to Muster (${availability(state).mil} Available now)`,12,0,''),mode:'muster'},
+        ...movement.map(field => ({...field,mode:'move'})),
+      ],options.reinforceBonus ? 0 : 1,REGIONS.length,
+      `${options.free ? 'Reinforce is free.' : 'Each Reinforce space costs 2 Resources.'} For Muster, leave the count blank to use Available Militia, or enter a count to use recycling. Supply and Control are checked when the Feat resolves. Movement to adjacent Battles is limited to D6−2${options.reinforceBonus ? '+'+options.reinforceBonus : ''} Troops per origin.`)
     }
     case 'Requisition':
       return rowSet([spaceField()],0,6,'Select up to six spaces with a Dux piece and a Civitates Stronghold. Dux Plunder anywhere converts to Dux Resources even with zero selected spaces.')
@@ -214,11 +232,8 @@ export function commandFields(state,faction,command,feat,options={}) {
   const fields = faction === 'd' ? duxPaymentFields(state,options) : []
   if (faction === 'c' && !options.free) fields.push(qty('wealthSpend','Wealth to use as Resources (blank = blue first)',80,0,''))
   if (feat && command !== 'Return') fields.push(box('featBefore',`Resolve ${feat} before the Command`))
-  if (command === 'Train' || command === 'Muster' || feat === 'Invite' || feat === 'Settle' || feat === 'Entreat') {
-    const example = command === 'Train' ? 'cavalry@Carvetii=2' : command === 'Muster' ? 'militia@Dobunni=1' :
-      feat === 'Invite' ? (faction === 'd' ? 'dxw' : 'cxw')+'@Dobunni=1' : faction+'w@Dumnonii=1'
-    fields.push(line('recycle','Recycle units when supply is exhausted','Optional: '+example))
-  }
+  const recycling = recycleField(faction,command,feat)
+  if (recycling) fields.push(recycling)
   let spec
   switch (command) {
     case 'Train':
@@ -873,7 +888,8 @@ export function runCommandFeat(state,{faction,command,feat,options={},rows=[],in
   const draft = clone(state)
   const journal = []
   const {spend} = commandEconomy(draft,faction,options,input)
-  const recycle = recycleEntries(input.recycle,faction,command,feat)
+  const recycle = feat === 'Reinforce' && rows.every(row => row.mode === 'move')
+    ? [] : recycleEntries(input.recycle,faction,command,feat)
   executeFeat(draft,feat,rows,{faction,spend,options,input,battleSpaces,returning:new Map(),recycle},roll,journal)
   updateCommandState(state,draft)
   return journal.join('. ')

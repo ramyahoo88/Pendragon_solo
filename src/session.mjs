@@ -58,6 +58,11 @@ export function parseSave(text) {
         // Replan prepared bot actions and retain human command inputs.
         if (job.kind === 'action' && job.requests) delete work.input.battle
         else battle.answers = []
+        delete battle.countDraft
+      } else if (battle.countDraft !== undefined) {
+        const draft = battle.countDraft
+        ensure(draft?.index === answers.length && Array.isArray(draft.values) && draft.values.length > 0 &&
+          draft.values.length <= 24 && draft.values.every(value => inRange(value,0,30)), 'Invalid unconfirmed Omens counts.')
       }
     }
     if (editor !== undefined) ensure(work.draft && (editor === 'tracks' || Object.hasOwn(BY_NAME,editor)), 'Invalid pending board editor.')

@@ -35,9 +35,10 @@ export function resolveOmens(state, use) {
   if (use) state.omens = { holder:null, head:faction, card:state.current }
   return use
 }
-export function log(state, title, detail = '', dice = [], battles = []) {
+export function log(state, title, detail = '', dice = [], battles = [], upkeep) {
   const entry = { title, detail, dice, card: state.current, epoch: state.epoch }
   if (battles.length) entry.battles = battles
+  if (upkeep) entry.upkeep = upkeep
   state.log.push(entry)
 }
 function reveal(state,id,allowedEnd = false) {
@@ -516,7 +517,7 @@ export function advanceEpoch(state, info = {}, replacement = null) {
     resolveRecovery(state)
     reveal(state, replacement, true)
   }
-  log(state,phase,[info.note,annonaNote,info.recoveryNote].filter(Boolean).join(' '),info.dice || [])
+  log(state,phase,[info.note,annonaNote,info.recoveryNote].filter(Boolean).join(' '),info.dice || [],undefined,info.upkeep)
   if (state.result) {
     state.epochPhase = null
     log(state, `${NAMES[state.result.winner]} wins`, state.result.reason === 'final' ? 'Final scoring at the last Epoch (§6.3, §7.3).' : 'Victory threshold reached (§7.1–7.2).')
@@ -539,6 +540,8 @@ export function validBattleCalculations(battles) {
       Array.isArray(unit.modifiers) && unit.modifiers.length <= 6 && unit.modifiers.every(text)) &&
     Array.isArray(side.removed) && side.removed.length <= 100 && side.removed.every(text)
   return Array.isArray(battles) && battles.length < 70 && battles.every(battle => Boolean(battle) && own(BY_NAME,battle.name) &&
+    (battle.tactics === undefined || Array.isArray(battle.tactics) && battle.tactics.length <= 50 &&
+      battle.tactics.every(line => typeof line === 'string' && line.length <= 300)) &&
     Array.isArray(battle.field) && battle.field.length <= 4 && battle.field.every(step => !!step &&
       ['Trap','Charge / Ambush','Melee','Harass'].includes(step.phase) && volley(step.attackers) && volley(step.defenders)) &&
     Array.isArray(battle.assaults) && battle.assaults.length <= 2*BY_NAME[battle.name].sites.length && battle.assaults.every(step => {
@@ -548,6 +551,15 @@ export function validBattleCalculations(battles) {
       }
       return step.phase === 'Storm' && step.skipped === undefined && volley(step.attackers) && volley(step.defenders)
     }))
+}
+function validUpkeepReport(report) {
+  const line = value => typeof value === 'string' && value.length <= 350
+  const owner = value => value === null || value === 'b' || FACTIONS.includes(value)
+  return report && line(report.priority) && Array.isArray(report.notes) && report.notes.length <= 100 && report.notes.every(line) &&
+    Array.isArray(report.moves) && report.moves.length <= 100 && report.moves.every(move =>
+      move && own(BY_NAME,move.from) && (own(BY_NAME,move.to) || move.to === 'Available') && own(GROUP,move.key) && inRange(move.count,1,30)) &&
+    Array.isArray(report.control) && report.control.length <= REGIONS.length && report.control.every(change =>
+      change && own(BY_NAME,change.name) && owner(change.before) && owner(change.after))
 }
 export function validateSave(state, options) {
   validatePosition(state,options)
@@ -572,7 +584,8 @@ export function validateSave(state, options) {
   ensure(Array.isArray(state.log) && state.log.length < 1050 && state.log.every(entry => {
     return typeof entry?.title === 'string' && entry.title.length < 250 && typeof entry.detail === 'string' && entry.detail.length < 3000 &&
       Array.isArray(entry.dice) && entry.dice.every(die => typeof die?.label === 'string' && [4,6].includes(die.sides) && inRange(die.value,1,die.sides)) &&
-      (entry.battles === undefined || validBattleCalculations(entry.battles))
+      (entry.battles === undefined || validBattleCalculations(entry.battles)) &&
+      (entry.upkeep === undefined || validUpkeepReport(entry.upkeep))
   }), 'Invalid campaign journal.')
   return state
 }

@@ -188,7 +188,7 @@ legend{padding:0 5px;color:var(--muted);font-size:12px;font-weight:650}
 const modules = {"data":{},"cards":{},"scenarios":{},"position":{},"sequence":{},"battle":{},"commands":{},"operations":{},"grants":{},"epoch-economy":{},"events":{},"event-policy":{},"bots":{},"action-resolution":{},"session":{},"ui":{}}
 ;
 (() => {
-const VERSION = '0.3.5'
+const VERSION = '0.3.6'
 const SCHEMA = 1
 const EDITION = 'GMT Living Rules · November 2023'
 const SCENARIO = 'Barbarian Conspiracy'
@@ -927,9 +927,10 @@ function resolveOmens(state, use) {
   if (use) state.omens = { holder:null, head:faction, card:state.current }
   return use
 }
-function log(state, title, detail = '', dice = [], battles = []) {
+function log(state, title, detail = '', dice = [], battles = [], upkeep) {
   const entry = { title, detail, dice, card: state.current, epoch: state.epoch }
   if (battles.length) entry.battles = battles
+  if (upkeep) entry.upkeep = upkeep
   state.log.push(entry)
 }
 function reveal(state,id,allowedEnd = false) {
@@ -1408,7 +1409,7 @@ function advanceEpoch(state, info = {}, replacement = null) {
     resolveRecovery(state)
     reveal(state, replacement, true)
   }
-  log(state,phase,[info.note,annonaNote,info.recoveryNote].filter(Boolean).join(' '),info.dice || [])
+  log(state,phase,[info.note,annonaNote,info.recoveryNote].filter(Boolean).join(' '),info.dice || [],undefined,info.upkeep)
   if (state.result) {
     state.epochPhase = null
     log(state, `${NAMES[state.result.winner]} wins`, state.result.reason === 'final' ? 'Final scoring at the last Epoch (§6.3, §7.3).' : 'Victory threshold reached (§7.1–7.2).')
@@ -1431,6 +1432,8 @@ function validBattleCalculations(battles) {
       Array.isArray(unit.modifiers) && unit.modifiers.length <= 6 && unit.modifiers.every(text)) &&
     Array.isArray(side.removed) && side.removed.length <= 100 && side.removed.every(text)
   return Array.isArray(battles) && battles.length < 70 && battles.every(battle => Boolean(battle) && own(BY_NAME,battle.name) &&
+    (battle.tactics === undefined || Array.isArray(battle.tactics) && battle.tactics.length <= 50 &&
+      battle.tactics.every(line => typeof line === 'string' && line.length <= 300)) &&
     Array.isArray(battle.field) && battle.field.length <= 4 && battle.field.every(step => !!step &&
       ['Trap','Charge / Ambush','Melee','Harass'].includes(step.phase) && volley(step.attackers) && volley(step.defenders)) &&
     Array.isArray(battle.assaults) && battle.assaults.length <= 2*BY_NAME[battle.name].sites.length && battle.assaults.every(step => {
@@ -1440,6 +1443,15 @@ function validBattleCalculations(battles) {
       }
       return step.phase === 'Storm' && step.skipped === undefined && volley(step.attackers) && volley(step.defenders)
     }))
+}
+function validUpkeepReport(report) {
+  const line = value => typeof value === 'string' && value.length <= 350
+  const owner = value => value === null || value === 'b' || FACTIONS.includes(value)
+  return report && line(report.priority) && Array.isArray(report.notes) && report.notes.length <= 100 && report.notes.every(line) &&
+    Array.isArray(report.moves) && report.moves.length <= 100 && report.moves.every(move =>
+      move && own(BY_NAME,move.from) && (own(BY_NAME,move.to) || move.to === 'Available') && own(GROUP,move.key) && inRange(move.count,1,30)) &&
+    Array.isArray(report.control) && report.control.length <= REGIONS.length && report.control.every(change =>
+      change && own(BY_NAME,change.name) && owner(change.before) && owner(change.after))
 }
 function validateSave(state, options) {
   validatePosition(state,options)
@@ -1464,7 +1476,8 @@ function validateSave(state, options) {
   ensure(Array.isArray(state.log) && state.log.length < 1050 && state.log.every(entry => {
     return typeof entry?.title === 'string' && entry.title.length < 250 && typeof entry.detail === 'string' && entry.detail.length < 3000 &&
       Array.isArray(entry.dice) && entry.dice.every(die => typeof die?.label === 'string' && [4,6].includes(die.sides) && inRange(die.value,1,die.sides)) &&
-      (entry.battles === undefined || validBattleCalculations(entry.battles))
+      (entry.battles === undefined || validBattleCalculations(entry.battles)) &&
+      (entry.upkeep === undefined || validUpkeepReport(entry.upkeep))
   }), 'Invalid campaign journal.')
   return state
 }
@@ -1641,6 +1654,10 @@ function runBattle(state,config,roll,reply = null) {
   const details = []
   const field = []
   const assaults = []
+  const tacticsNotes = []
+  const explain = (faction,step,line) => {
+    if (!config.ignoreTactics && !humanSide(state,faction)) tacticsNotes.push(`§8.4.2 · ${step} · ${NAMES[faction]} · ${line}`)
+  }
   const bellorum = (units,lead,fortDefends = false) => {
     if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
       !(fortDefends || units.some(unit => unit.owner === 'd'))) return units
@@ -1806,12 +1823,37 @@ function runBattle(state,config,roll,reply = null) {
   }
   const traps = unit => (config.trap?.includes(unit.key) && (!config.trapSide || config.trapSide === 'attacker' && participants.includes(unit) || config.trapSide === 'defender' && defenders.includes(unit))) ||
     (activeSide(state,56,'shaded') && attacker === 's' && BY_NAME[name].terrain === 'Hills' && commandBattle(config.source) && unit.key === 'sw')
+  const fieldStages = [
+    ['Trap',traps],
+    ['Charge / Ambush',unit => unit.key === 'cav' || unit.ambush],
+    ['Melee',unit => !isRaider(unit.key)],
+    ['Harass',unit => isRaider(unit.key)],
+  ]
+  const struck = new Set()
+  function defenderTactic({raiders,home,hasWarbands,mayEvade,ravaging,outnumbered}) {
+    if (home) {
+      if (raiders && ravaging) return ['ambush','Ravaging Saxon Raiders cannot Evade.']
+      if (raiders && !hasWarbands && mayEvade) return ['evade','Raiders are alone in Home terrain.']
+      const troopEvades = mayEvade && outnumbered && !sites.length
+      const reason = troopEvades ? 'Outnumbered with no friendly Stronghold.' :
+        !mayEvade ? 'Evasion is barred.' : sites.length ? 'A friendly Stronghold is present.' : 'The defending side is not outnumbered.'
+      return [troopEvades ? 'evade' : 'ambush',raiders && hasWarbands ? 'Raiders follow their Warbands. '+reason : reason]
+    }
+    if (!mayEvade) return ['none','Evasion is barred in this Battle.']
+    if (!hasWarbands) return ['evade','Raiders are fighting without Warbands.']
+    // Enemy tactics have already resolved. Project the remaining Field Battle
+    // with the Raiders and Warbands standing together before any Withdrawal.
+    return projectedFieldRemovals([],true) > 0
+      ? ['none','The defending force can remove an enemy in the field.']
+      : ['evade','The defending force would remove no enemy in the field.']
+  }
   function tactics(units,isAttacker) {
     if (config.ignoreTactics) {
       if (!isAttacker && config.defenderAmbush) for (const unit of units) unit.ambush = homeTerrain(state,name,unit)
       return
     }
     const rough = ['Fens','Hills'].includes(BY_NAME[name].terrain)
+    const outnumbered = present(defenders).length < present(participants).length
     for (const raiders of [true,false]) {
       for (const faction of [...new Set(units.map(unit => unit.owner))]) {
         const eligible = units.filter(unit => unit.owner === faction && (raiders ? isRaider(unit.key) : !isRaider(unit.key) && homeTerrain(state,name,unit)))
@@ -1821,13 +1863,19 @@ function runBattle(state,config,roll,reply = null) {
         const options = [{value:'none',label:'Stand and fight'}]
         if (mayEvade) options.push({value:'evade',label:'Attempt Evasion'})
         if (home) options.push({value:'ambush',label:'Attempt Ambush'})
-        const enemies = isAttacker ? defenders : participants
-        const enemyWeight = enemies.reduce((total,unit) => total+unitStrength(unit),0)
-        const ownWeight = units.reduce((total,unit) => total+unitStrength(unit),0)
-        const defaultMove = isAttacker ? (home && !eligible.every(traps) ? 'ambush' : 'none') : (mayEvade && (raiders && (!home || ownWeight < enemyWeight) || !raiders && !sites.length && ownWeight < enemyWeight) ? 'evade' : home ? 'ambush' : 'none')
-        const tactic = choose('Pre-Battle',`${NAMES[faction]} ${raiders ? 'Raiders' : 'Troops in Home Terrain'}`,options,defaultMove,humanSide(state,faction))
-        if (tactic === 'none') continue
+        const hasWarbands = units.some(unit => unit.owner === faction && isBand(unit.key))
+        const [defaultMove,reason] = isAttacker
+          ? eligible.every(traps) ? ['none','Eligible Units already strike at Trap.'] :
+            home ? ['ambush','Eligible Units can Ambush in Home terrain.'] : ['none','Attacking Raiders have no Home Ambush.']
+          : defenderTactic({raiders,home,hasWarbands,mayEvade,ravaging:config.ravage && faction === 'x',outnumbered})
+        const group = raiders ? 'Raiders' : 'Troops in Home Terrain'
+        const tactic = choose('Pre-Battle',`${NAMES[faction]} ${group}`,options,defaultMove,humanSide(state,faction))
         const threshold = tactic === 'ambush' ? raiders ? 5 : 3 : raiders ? home ? 4 : rough ? 5 : 6 : 5
+        const target = threshold === 6 ? '6' : `${threshold}–6`
+        const action = tactic === 'none' ? 'Stand and fight' : tactic === 'evade' ? `Evade on ${target}` : `Ambush on ${target}`
+        const note = tactic === 'none' && isAttacker && eligible.every(traps) ? reason : `${action}. ${reason}`
+        explain(faction,`${isAttacker ? 'Attacking' : 'Defending'} ${group}`,note)
+        if (tactic === 'none') continue
         const raw = roll(6,`${NAMES[faction]} ${tactic} · ${name}`)
         const n = raw+(isAttacker ? 0 : config.defenderTacticsModifier ?? 0)
         for (const unit of eligible) {
@@ -1854,13 +1902,6 @@ function runBattle(state,config,roll,reply = null) {
   if (config.afterPlunder) config.afterPlunder()
   tactics(participants,true)
   tactics(defenders,false)
-  const fieldStages = [
-    ['Trap',traps],
-    ['Charge / Ambush',unit => unit.key === 'cav' || unit.ambush],
-    ['Melee',unit => !isRaider(unit.key)],
-    ['Harass',unit => isRaider(unit.key)],
-  ]
-  const struck = new Set()
   function fieldVolley(a,d,selector,spent,survives = stillPresent) {
     if (!a.length || !d.length) return
     const aHits = a.filter(unit => !spent.has(unit.id) && selector(unit))
@@ -1902,14 +1943,14 @@ function runBattle(state,config,roll,reply = null) {
     })
     details.push(`${stage}: attackers take ${qty(aLoss/2)}, defenders take ${qty(dLoss/2)}.`)
   }
-  function projectedFieldRemovals(withdrawn = []) {
+  function projectedFieldRemovals(withdrawn = [],includeTrap = false) {
     const dead = new Set()
     const spent = new Set(struck)
     const aField = inField(participants)
     const dField = inField(defenders).filter(unit => !withdrawn.includes(unit))
     const survives = unit => stillPresent(unit) && !dead.has(unit)
-    // Trap and the pre-Battle dice are already resolved when Withdrawal is offered.
-    for (const [,selector] of fieldStages.slice(1)) {
+    // Withdrawal is evaluated after Trap; the earlier Evasion decision includes Trap.
+    for (const [,selector] of fieldStages.slice(includeTrap ? 0 : 1)) {
       const a = aField.filter(survives)
       const d = dField.filter(survives)
       const volley = fieldVolley(a,d,selector,spent,survives)
@@ -2014,6 +2055,11 @@ function runBattle(state,config,roll,reply = null) {
         if (!admitsAlly(site,side,'Withdrawal')) { stay.add(unit.id); continue }
         for (const piece of together ? matching.slice(0,remainingCapacity(site)) : [unit]) piece.site = site.index
       }
+      const retreats = sortedSites.flatMap(site => {
+        const count = factionUnits.filter(unit => unit.site === site.index).length
+        return count ? [`${count} to ${BY_NAME[name].sites[site.index].name}`] : []
+      })
+      if (retreats.length) explain(side,'Withdrawal',`Withdraw ${retreats.join(', ')} to defend the Strongholds.`)
     }
     const withdrawn = defenders.filter(unit => unit.site !== null && !unit.dead).length
     if (withdrawn) details.push(`${withdrawn} defending ${withdrawn === 1 ? 'Unit withdraws' : 'Units withdraw'}.`)
@@ -2033,18 +2079,22 @@ function runBattle(state,config,roll,reply = null) {
       if (site) {
         unit.site = site.index
         details.push('Cavalry withdraws after its Charge into '+BY_NAME[name].sites[unit.site].name+'.')
+        explain(unit.owner,'Withdrawal','Cair Legion withdraws Cavalry after Charge / Ambush.')
       }
     }
   }
   for (const stage of fieldStages.slice(2)) fieldStep(...stage)
 
-  function capturedGold(amount,allowCavalry,limitedToAttacker=false) {
-    const eligible = present(participants).filter(unit => !unit.gold && (allowCavalry || unit.key !== 'cav') && (!limitedToAttacker || unit.owner === attacker)).sort(byFriendlyPiece)
+  function capturedGold(amount,allowCavalry) {
+    const player = humanSide(state,attacker)
+    const eligible = present(participants).filter(unit => !unit.gold && (allowCavalry || unit.key !== 'cav'))
+      .sort((a,b) => (player ? 0 : Number(b.owner === attacker)-Number(a.owner === attacker)) || byFriendlyPiece(a,b))
     const take = Math.min(amount,goldAvailable(state),eligible.length)
     for (const unit of eligible.slice(0,take)) {
       unit.gold = true
       land.units[unit.key][1]++
     }
+    if (take) explain(attacker,'Battle consequences',`Assign ${take} Plunder to the acting faction first, then to allies with room.`)
     return take
   }
   if (present(participants).length && !inField(defenders).length && !config.ravage && !config.noAssault && !config.siegeOnly) {
@@ -2054,10 +2104,14 @@ function runBattle(state,config,roll,reply = null) {
       const preferred = [...left].sort((a,b)=>insideOf(a).length-insideOf(b).length).find(site=>projectedAssault(site,insideOf(site)).captures)
       const options = [{value:'none',label:'Skip Assault'},...left.map(site => ({value:String(site.index),label:BY_NAME[name].sites[site.index].name+' · '+PIECES[site.piece]}))]
       const selected = choose('Assault','Choose a Stronghold to assault',options,preferred ? String(preferred.index) : 'none',humanSide(state,attacker) && !config.ignoreTactics)
-      if (selected === 'none') break
+      if (selected === 'none') {
+        explain(attacker,'Assault','Skip Assault because no remaining Stronghold can be captured.')
+        break
+      }
       const site = left.find(item => item.index === Number(selected))
       const inside = insideOf(site)
       const stronghold = BY_NAME[name].sites[site.index].name
+      explain(attacker,'Assault',`Attack ${stronghold}, a capturable Stronghold with the fewest Withdrawn units among the targets that can fall.`)
       useOmens('assault',[...present(participants),...inside],stronghold)
       site.used = true
       const assailants = present(participants)
@@ -2132,15 +2186,24 @@ function runBattle(state,config,roll,reply = null) {
   const removedGold = defenders.filter(unit => unit.dead && unit.gold).length
   if (removedGold > 0) {
     const options = [{value:'carry',label:'Keep up to half on participating Units'}, {value:'leave',label:'Leave removed Plunder off board'}]
-    if (briton(attacker)) options.push({value:'restore',label:'Return one cube as Prosperity'})
+    const prosperCap = 2*(BY_NAME[name].terrain === 'City' ? BY_NAME[name].printed : land.pop)
+    const canRestore = briton(attacker) && totalProsperity(land) < prosperCap && goldAvailable(state) > 0
+    if (canRestore) options.push({value:'restore',label:'Return one cube as Prosperity'})
     if (!briton(attacker) && friendlyControl(state,name,attacker)) options.push({value:'renown',label:'Gain Renown for each removed cube'})
     const carry = Math.floor(removedGold / 2)
-    const canCarry = carry && present(participants).some(unit => !unit.gold && unit.key !== 'cav')
-    const preferred = attacker === 'd' && !canCarry ? 'restore' : options.some(item => item.value === 'renown') ? 'renown' : canCarry ? 'carry' : 'leave'
-    const result = choose('Consequences',`Use ${removedGold} removed Plunder?`,options,preferred,humanSide(state,attacker) && !config.ignoreTactics)
+    const canCarry = carry > 0 && goldAvailable(state) > 0 && present(participants).some(unit => !unit.gold && unit.key !== 'cav')
+    const player = humanSide(state,attacker)
+    const restore = attacker === 'd' && canRestore && (player ? !canCarry : !isFragmentation(state))
+    const preferred = restore ? 'restore' : player && options.some(item => item.value === 'renown') ? 'renown' : canCarry ? 'carry' : 'leave'
+    const result = choose('Consequences',`Use ${removedGold} removed Plunder?`,options,preferred,player && !config.ignoreTactics)
     if (result === 'carry') capturedGold(carry,false)
-    if (result === 'restore') addProsperity(state,name,1)
+    if (result === 'restore') {
+      addProsperity(state,name,1)
+      details.push(`${NAMES[attacker]} restores one Prosperity from removed Plunder.`)
+      explain(attacker,'Battle consequences','Restore Prosperity when able before Fragmentation.')
+    }
     if (result === 'renown') changeTrack(state,attacker,removedGold)
+    if (result === 'leave') explain(attacker,'Battle consequences','Leave Plunder off board because the bot cannot carry or restore it under its Battle rules.')
   }
   if (config.retaliate && attacker === 'd' && destroyed.length && sites.filter(site => site.owner === defender).every(site => site.destroyed)) {
     changeTrack(state,'prestige',3)
@@ -2148,18 +2211,25 @@ function runBattle(state,config,roll,reply = null) {
   }
   if (!inField(defenders).length && !config.noSiege) {
     let spare = present(participants).filter(unit => !isRaider(unit.key)).length
-    for (const site of sortedSites) {
-      if (site.used || site.destroyed || spare < site.capacity) continue
-      const troops = present(defenders).filter(unit => unit.site === site.index)
-      if (!troops.length) continue
+    const targets = sortedSites.flatMap(site => {
+      if (site.used || site.destroyed || spare < site.capacity) return []
+      const troops = insideOf(site).sort(byLossPriority)
+      return troops.length ? [{site,troops,forced:troops[0]}] : []
+    })
+    if (!humanSide(state,attacker)) targets.sort((a,b) =>
+      pieceOrder[GROUP[a.forced.key].piece]-pieceOrder[GROUP[b.forced.key].piece] ||
+      Number(b.forced.gold)-Number(a.forced.gold) || siteSort(a.site,b.site))
+    for (const {site,troops,forced} of targets) {
+      if (spare < site.capacity) continue
       const siege = choose('Siege','Besiege '+BY_NAME[name].sites[site.index].name+'?',[
         {value:'yes',label:'Besiege · commit '+site.capacity+' Troops'}, {value:'no',label:'Skip Siege'},
       ],'yes',humanSide(state,attacker) && !config.ignoreTactics)
       if (siege === 'no') continue
       spare -= site.capacity
-      const target = pickUnit('Siege','Select one Unit lost to Siege',troops,[...troops].sort(byLossPriority)[0],troops.some(unit => humanSide(state,unit.owner)) && !config.ignoreTactics)
+      const target = pickUnit('Siege','Select one Unit lost to Siege',troops,forced,troops.some(unit => humanSide(state,unit.owner)) && !config.ignoreTactics)
       kill(target,state,land)
       details.push(`Siege removes ${labelUnit(target)} at ${BY_NAME[name].sites[site.index].name}.`)
+      explain(attacker,'Siege',`Besiege ${BY_NAME[name].sites[site.index].name}; its forced loss is ${labelUnit(forced)} or a higher-priority Unit.`)
     }
   }
   const removedAtt = participants.filter(unit => unit.dead).map(labelUnit)
@@ -2167,7 +2237,7 @@ function runBattle(state,config,roll,reply = null) {
   if (removedAtt.length) details.push(`Attacker losses · ${removedAtt.join(', ')}.`)
   if (removedDef.length) details.push(`Defender losses · ${removedDef.join(', ')}.`)
   return {
-    name, attacker, defender, details, field, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
+    name, attacker, defender, details, field, assaults, tactics:tacticsNotes, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
     prestigeChange:state.tracks.prestige-prestigeBefore, renownChange:(state.tracks[attacker] ?? 0)-renownBefore,
     defenderField:inField(defenders).length, attackerField:inField(participants).length,
     defenderStanding:present(defenders).length, attackerPlunder:present(participants).filter(unit => unit.gold).length,
@@ -2325,6 +2395,7 @@ function knownTroop(value) {
 
 function recycleEntries(value,faction,command,feat) {
   if (!value) return []
+  ensure(typeof value === 'string','Enter recycling as a unit, space and count.')
   const permitted = new Set([
     ...(command === 'Train' ? ['cav'] : command === 'Muster' ? ['mil','com'] : feat === 'Reinforce' ? ['mil'] : []),
     ...(feat === 'Invite' ? [faction+'xw',faction+'sw'] : []),
@@ -2444,6 +2515,18 @@ function rowSet(rows,minRows,maxRows,help) {
   return { rows,minRows,maxRows,help }
 }
 
+function recycleField(faction,command,feat) {
+  let example
+  if (command === 'Train') example = 'cavalry@Carvetii=2'
+  else if (command === 'Muster' || feat === 'Reinforce') example = 'militia@Dumnonii=1'
+  else if (feat === 'Invite') example = faction+'xw@Dobunni=1'
+  else if (feat === 'Settle' || feat === 'Entreat') example = faction+'w@Dumnonii=1'
+  return example ? {
+    ...line('recycle','Recycle units when supply is exhausted',example),
+    hint:`Optional. Enter up to the number you can spare, for example ${example}. Separate sources with commas. The app uses only what it needs.`,
+  } : null
+}
+
 function commandFeatFields(state,faction,command,feat,options={}) {
   if (!feat || !featOwners[feat]?.includes(faction) || !FEATS[faction]?.[command]?.includes(feat)) return null
   if ((options.limited || options.free) && options.allowFeat !== true) return null
@@ -2457,12 +2540,17 @@ function commandFeatFields(state,faction,command,feat,options={}) {
       return rowSet([spaceField('Region',spaces(name => !isCity(name))),choose('enemy','Stronghold owner to penalize',[['','Automatic if one enemy'],['d','Dux'],['x','Saxons'],['s','Scotti']]),...ownerTroops.c.map(key => qty('loot-'+key,`Plunder on ${groupLabel(key)}`,30,0,''))],1,REGIONS.length,'Pillage in Regions without Briton Control. Leave all Plunder fields blank to fill available carrying capacity in unit order.')
     case 'Reinforce': {
       const groups = [...ownerTroops.c,...(canUseAllies(state,faction) ? ownerTroops.d : [])]
-      return rowSet([
-        spaceField('Reinforce space'),choose('mode','Reinforce',[['muster','Muster Militia here'],['move','Move troops to adjacent Battles']],'muster',true),
+      const movement = [
         choose('destination','Battle destination for moving troops',selectList(spaces())),
         line('formation','Optional movement split','e.g. Dobunni mil=2 com=1:1; Silures cxw=1'),
         ...groups.flatMap(group => [qty(group,groupLabel(group),30,0,''),qty(group+'p',`Plunder on ${groupLabel(group)} (optional)`,30,0,'')]),
-      ],1,REGIONS.length,'Each Reinforce space costs 2 Resources. Muster in a Battle space or roll D6−2 to send troops to adjacent Battle spaces. Counts indicate preference and are capped by the roll.')
+      ]
+      return rowSet([
+        spaceField('Reinforce space'),{...choose('mode','Reinforce',[['muster','Muster Militia here'],['move','Move troops to adjacent Battles']],'muster',true),refresh:true},
+        {...qty('mil',`Militia to Muster (${availability(state).mil} Available now)`,12,0,''),mode:'muster'},
+        ...movement.map(field => ({...field,mode:'move'})),
+      ],options.reinforceBonus ? 0 : 1,REGIONS.length,
+      `${options.free ? 'Reinforce is free.' : 'Each Reinforce space costs 2 Resources.'} For Muster, leave the count blank to use Available Militia, or enter a count to use recycling. Supply and Control are checked when the Feat resolves. Movement to adjacent Battles is limited to D6−2${options.reinforceBonus ? '+'+options.reinforceBonus : ''} Troops per origin.`)
     }
     case 'Requisition':
       return rowSet([spaceField()],0,6,'Select up to six spaces with a Dux piece and a Civitates Stronghold. Dux Plunder anywhere converts to Dux Resources even with zero selected spaces.')
@@ -2485,11 +2573,8 @@ function commandFields(state,faction,command,feat,options={}) {
   const fields = faction === 'd' ? duxPaymentFields(state,options) : []
   if (faction === 'c' && !options.free) fields.push(qty('wealthSpend','Wealth to use as Resources (blank = blue first)',80,0,''))
   if (feat && command !== 'Return') fields.push(box('featBefore',`Resolve ${feat} before the Command`))
-  if (command === 'Train' || command === 'Muster' || feat === 'Invite' || feat === 'Settle' || feat === 'Entreat') {
-    const example = command === 'Train' ? 'cavalry@Carvetii=2' : command === 'Muster' ? 'militia@Dobunni=1' :
-      feat === 'Invite' ? (faction === 'd' ? 'dxw' : 'cxw')+'@Dobunni=1' : faction+'w@Dumnonii=1'
-    fields.push(line('recycle','Recycle units when supply is exhausted','Optional: '+example))
-  }
+  const recycling = recycleField(faction,command,feat)
+  if (recycling) fields.push(recycling)
   let spec
   switch (command) {
     case 'Train':
@@ -3144,7 +3229,8 @@ function runCommandFeat(state,{faction,command,feat,options={},rows=[],input={},
   const draft = clone(state)
   const journal = []
   const {spend} = commandEconomy(draft,faction,options,input)
-  const recycle = recycleEntries(input.recycle,faction,command,feat)
+  const recycle = feat === 'Reinforce' && rows.every(row => row.mode === 'move')
+    ? [] : recycleEntries(input.recycle,faction,command,feat)
   executeFeat(draft,feat,rows,{faction,spend,options,input,battleSpaces,returning:new Map(),recycle},roll,journal)
   updateCommandState(state,draft)
   return journal.join('. ')
@@ -3192,22 +3278,22 @@ function runCommand(state,{faction,command,feat,options={},rows=[],featRows=[],i
   return journal.join('. ')
 }
 
-Object.assign(modules["commands"],{commandEconomy,duxPaymentFields,commandFeatFields,commandFields,runCommandFeat,runCommand})
+Object.assign(modules["commands"],{commandEconomy,duxPaymentFields,recycleField,commandFeatFields,commandFields,runCommandFeat,runCommand})
 })()
 ;
 (() => {
 const { BY_NAME, NAMES, REGIONS, ROADS, SEAS } = modules["data"]
 const { availability, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, hasStronghold, humanFactions, inRange, isFragmentation, loaded, moveUnits, on, plunderTo, preemption, toOwner, totalProsperity } = modules["position"]
 const { battleEnemies, battleTargets, raidReactionSafe } = modules["battle"]
-const { commandEconomy, commandFeatFields, duxPaymentFields, runCommandFeat } = modules["commands"]
+const { commandEconomy, commandFeatFields, duxPaymentFields, recycleField, runCommandFeat } = modules["commands"]
 const operationTroops = { d:['cav','dxw','dsw'], c:['mil','com','cxw','csw'], x:['xw'], s:['sw'] }
 const pick = (key,label,options,required = true) => ({key,label,type:'select',options:[['','Choose…'],...options],required})
 const check = (key,label) => ({key,label,type:'check',default:false})
 const countField = (key,label,defaultValue = '0') => ({key,label,type:'number',min:0,max:30,default:defaultValue})
 const spaceOption = names => names.map(name => [name,name])
 const selected = value => value === true || ['yes','on','1','true'].includes(value)
-const timedBattleFeat = feat => feat === 'Requisition' || feat === 'Entreat'
-const defaultBattleFeatTiming = (feat,input) => feat === 'Entreat' || selected(input.featBefore) ? 'before' : 'after'
+const timedBattleFeat = feat => ['Requisition','Entreat','Reinforce','Pillage'].includes(feat)
+const defaultBattleFeatTiming = (feat,input) => feat === 'Requisition' && !selected(input.featBefore) ? 'after' : 'before'
 const humanHas = (state,faction) => humanFactions(state).includes(faction)
 const hasSide = (state,id,side) => state.markers[id]?.side === side
 const niallBox = 'niall-box'
@@ -3320,30 +3406,41 @@ function militaryFields(state,faction,command,feat,options,input = {}) {
   const cap = options.limited ? 1 : options.spaceLimit ?? REGIONS.length
   if (command === 'Battle') {
     const enemies = options.enemies ?? ['d','c','x','s'].filter(key => key !== faction)
-    const names = (options.reinforceBonus ? REGIONS.filter(({name}) => battleEnemies(state,name,faction).some(owner => enemies.includes(owner))).map(r => r.name) : battleTargets(state,faction))
+    // Reinforce can supply the first acting Troop before a selected Battle.
+    const canReinforce = feat === 'Reinforce' && input.featTiming !== 'after'
+    const names = (canReinforce ? REGIONS.map(({name}) => name) : battleTargets(state,faction))
       .filter(name => (!options.regionsOnly || BY_NAME[name].terrain !== 'City') && battleEnemies(state,name,faction).some(owner => enemies.includes(owner)))
     const base = [pick('space','Battle space',spaceOption(names)),pick('enemy','Defender',enemies.map(key => [key,NAMES[key]]),false),
       ...(['Retaliate','Surprise','Ravage','Ransom'].includes(feat) ? [check('tactic','Use '+feat+' here')] : [])]
-    const controls = feat === 'Reinforce' && !isFragmentation(state) ? [check('alliedConsent','Dux agrees to Reinforce')] : []
+    const featFields = commandFeatFields(state,faction,command,feat,options)
+    const controls = []
     if (timedBattleFeat(feat)) {
       const targets = Math.max(1,Math.min(cap,Number(input.rows) || 1))
       const between = Array.from({length:targets-1},(_,i) => [String(i+1),'After Battle '+(i+1)])
       controls.push({
         key:'featTiming',label:'When to '+feat,type:'select',
         options:[['before','Before the first Battle'],...between,['after','After the last Battle']],
-        default:defaultBattleFeatTiming(feat,input),
+        default:defaultBattleFeatTiming(feat,input),refresh:feat === 'Reinforce',
       })
     }
+    const recycling = recycleField(faction,command,feat)
+    if (feat === 'Reinforce' && featFields) {
+      const count = Math.max(featFields.minRows,Math.min(featFields.maxRows,Number(input.feats ?? featFields.minRows)))
+      const modes = Array.from({length:count},(_,i) => input[`feats${i}-mode`] || 'muster')
+      if (modes.includes('muster')) controls.push(recycling)
+      if (modes.includes('move') && !isFragmentation(state) && humanHas(state,'d')) controls.push(check('alliedConsent','Dux agrees to Reinforce'))
+    } else if (recycling) controls.push(recycling)
     return {
       minRows:1,maxRows:cap,rows:base,controls,
-      featFields: commandFeatFields(state,faction,command,feat,options),
+      featFields,
       help:'Select the Battle spaces. The app steps through tactics, losses, Strongholds, Plunder, and Siege.',
     }
   }
   if (command === 'Intercept' && faction === 'd') {
     const targetNames = REGIONS.filter(region => friendlyControl(state,region.name,'d') && (on(state.land[region.name],'xr') || on(state.land[region.name],'sr'))).map(region => region.name)
     const originNames = REGIONS.filter(region => friendlyControl(state,region.name,'d') && operationTroops.d.some(key => on(state.land[region.name],key))).map(region => region.name)
-    return { minRows:1,maxRows:REGIONS.length, controls:duxPaymentFields(state,options),
+    const recycling = recycleField(faction,command,feat)
+    return { minRows:1,maxRows:REGIONS.length, controls:[...duxPaymentFields(state,options),...(recycling ? [recycling] : [])],
       rows:[pick('space','Intercept target',spaceOption(targetNames)),pick('origin','Move from · optional',spaceOption(originNames),false),
         ...(hasSide(state,60,'unshaded') ? [check('sea','Move by sea')] : []),
         ...(feat === 'Retaliate' ? [check('tactic','Use Retaliate here')] : []),
@@ -3411,7 +3508,6 @@ function runMilitary(state,spec,roll,fight,reply) {
   }
   if (command === 'Battle' || command === 'Intercept') {
     if (['Surprise','Retaliate'].includes(feat)) ensure(new Set(rows.filter(row => selected(row.tactic)).map(row => row.space)).size <= 1,feat+' applies in a single space.')
-    if (['Pillage','Reinforce'].includes(feat) && (!options.reinforceBonus || featRows.length)) support()
     if (command === 'Intercept') {
       const origins = [...new Set(rows.map(row => row.origin).filter(Boolean))]
       const payment = commandEconomy(state,faction,options,input)
@@ -3446,10 +3542,10 @@ function runMilitary(state,spec,roll,fight,reply) {
     }
     const tacticalSpace = rows.find(row => selected(row.tactic))?.space ?? names[0]
     let featAt = null
-    if (timedBattleFeat(feat)) {
+    if (timedBattleFeat(feat) && (!options.reinforceBonus || featRows.length)) {
       const timing = input.featTiming || defaultBattleFeatTiming(feat,input)
       featAt = timing === 'before' ? 0 : timing === 'after' ? names.length : Number(timing)
-      ensure(inRange(featAt,0,names.length),'Choose when to '+feat+' during the selected Battles.')
+      ensure(timing === 'before' || timing === 'after' || inRange(featAt,1,names.length-1),'Choose when to '+feat+' during the selected Battles.')
       if (featAt === 0) support(input,'before the first Battle')
     }
     for (const [index,name] of names.entries()) {
@@ -3682,7 +3778,6 @@ function grantOperation(state,id,faction,side,input,restriction = {}) {
   const options = {...rule.options,tradeAll:picked(input.tradeAll)}
   let spec = command && (!rule.featChoice || rule.optionalFeat || feat) ?
     commandFields(staged,owner,command,feat,options) ?? militaryFields(staged,owner,command,feat,options,input) : null
-  if (spec && id === 23) spec = {...spec,featFields:{...spec.featFields,minRows:0}}
   if (spec && rule.options.troopsOnly) {
     const ignored = owner === 'd' ? ['restore'] : ['mode','site','newHillSite','hillSite']
     spec = {...spec,rows:spec.rows.filter(field => !ignored.includes(field.key))}
@@ -3786,7 +3881,7 @@ Object.assign(modules["grants"],{grantRule,setGrantMarkers,grantOperation,runGra
 ;
 (() => {
 const { BY_NAME, NAMES, RANDOM_SPACES, REGIONS } = modules["data"]
-const { availability, boardTotals, changeTrack, clone, control, ensure, goldAvailable, groupLabel, inRange, isFragmentation, isHumanFaction, isRoman, loaded, moveUnits, on, preemption, scores, setImperium, spendCivitates, spendDux, sum } = modules["position"]
+const { availability, boardTotals, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, inRange, isFragmentation, isHumanFaction, isRoman, loaded, moveUnits, on, piecesByOwner, preemption, scores, setImperium, spendCivitates, spendDux, sum } = modules["position"]
 const { TEARS_REGIONS } = modules["scenarios"]
 const epochEconomy = (() => {
   const names = REGIONS.map(region => region.name)
@@ -4105,16 +4200,105 @@ const epochEconomy = (() => {
       ensure(possible.includes(input[keyName]),'Choose a qualifying Stronghold for redeployment.')
       return input[keyName]
     }
-    if (faction === 'c' && !human(state,'c')) {
-      const candidates = possible.map(name => {
-        const draft = clone(state)
-        relocateUnits(draft,from,name,key,on(draft.land[from],key))
-        return {name,pop:boardTotals(draft).pop.c}
-      })
-      const best = Math.max(...candidates.map(({pop})=>pop))
-      return randomSpace(candidates.filter(({pop})=>pop===best).map(({name})=>name),roll,'Civitates redeployment')
-    }
     return randomSpace(possible,roll,NAMES[faction]+' redeployment')
+  }
+  function bestCubeQuarters(state,groups,roll) {
+    const slots = groups.flatMap(group => Array(group.count).fill(group))
+    const targets = [...new Set(groups.flatMap(group => group.targets))].flatMap(name => {
+      if (friendlyControl(state,name,'c')) return []
+      const counts = piecesByOwner(state.land[name],{raiders:false})
+      const friendly = counts.c + (isFragmentation(state) ? 0 : counts.d)
+      const need = sum(Object.values(counts))-2*friendly+1
+      const eligible = slots.flatMap((group,index) => group.targets.includes(name) ? [index] : [])
+      return need <= eligible.length ? [{name,need,eligible,pop:state.land[name].pop}] : []
+    }).sort((a,b) => b.pop-a.pop || a.need-b.need)
+
+    // A new Control only needs its threshold. Assign that many distinct legal
+    // cubes, reassigning earlier matches when a later Region has fewer sources.
+    function reserve(target,assigned,visited) {
+      for (const slot of target.eligible) {
+        if (visited.has(slot)) continue
+        visited.add(slot)
+        if (!assigned[slot] || reserve(assigned[slot],assigned,visited)) {
+          assigned[slot] = target
+          return true
+        }
+      }
+      return false
+    }
+    // Ignoring origin restrictions gives an upper bound for the remaining search.
+    const upper = [Array(slots.length+1).fill(0)]
+    for (const {need,pop} of [...targets].reverse()) {
+      const next = upper[0]
+      upper.unshift(next.map((skip,n) => n < need ? skip : Math.max(skip,pop+next[n-need])))
+    }
+    let best = -1
+    let plans = []
+    function search(index,left,pop,assigned) {
+      if (pop+upper[index][left] < best) return
+      const target = targets[index]
+      if (!target) {
+        if (pop > best) { best = pop; plans = [] }
+        plans.push(assigned)
+        return
+      }
+      if (left >= target.need) {
+        const attempt = [...assigned]
+        let matched = 0
+        while (matched < target.need && reserve(target,attempt,new Set())) matched++
+        if (matched === target.need) search(index+1,left-matched,pop+target.pop,attempt)
+      }
+      search(index+1,left,pop,assigned)
+    }
+    search(0,slots.length,0,Array(slots.length).fill(null))
+    return {slots,assigned:plans[randomIndex(plans.length,roll,'Civitates cube quarters · Control tie')]}
+  }
+  const cubePrefix = (key,from) => `cube-quarters-${key}-${from}-`
+  function civCubeQuarters(state,destinations,input,roll,report) {
+    if (!destinations.length) return
+    const flexible = []
+    const player = human(state,'c')
+    const before = report && boardTotals(state).pop.c
+    for (const from of names.filter(name => !destinations.includes(name))) {
+      const targets = nearest(from,destinations)
+      for (const key of ['mil','com']) {
+        const count = on(state.land[from],key)
+        const prefix = cubePrefix(key,from)
+        const explicit = player && Object.keys(input).some(name => name.startsWith(prefix) && hasInput(input,name))
+        const legacy = player && input[`nearest-${key}-${from}`]
+        if (explicit) {
+          const entered = allocation(input,prefix)
+          ensure(Object.keys(entered).every(to => !hasInput(entered,to) || targets.includes(to)),
+            `Choose only nearest Towns or Hillforts for ${groupLabel(key)} from ${from}.`)
+          const counts = targets.map(to => getNumber(entered,to,0,count))
+          ensure(sum(counts) === count,`Assign all ${count} surviving ${groupLabel(key)} from ${from}, or leave that group blank.`)
+          targets.forEach((to,index) => relocateUnits(state,from,to,key,counts[index],report))
+        } else if (count && legacy) {
+          ensure(targets.includes(legacy),'Choose a nearest Town or Hillfort for redeployment.')
+          relocateUnits(state,from,legacy,key,count,report)
+        } else if (count && targets.length === 1) {
+          relocateUnits(state,from,targets[0],key,count,report)
+        } else if (count) {
+          flexible.push({from,key,count,targets,moves:new Map()})
+        }
+      }
+    }
+    if (!flexible.length) return
+    const {slots,assigned} = bestCubeQuarters(state,flexible,roll)
+    for (const [index,target] of assigned.entries()) {
+      if (!target) continue
+      const group = slots[index]
+      group.moves.set(target.name,(group.moves.get(target.name) ?? 0)+1)
+    }
+    for (const {from,key,count,targets,moves} of flexible) {
+      const remaining = count-sum([...moves.values()])
+      if (remaining) {
+        const to = randomSpace(targets,roll,`${groupLabel(key)} quarters · ${from}`)
+        moves.set(to,(moves.get(to) ?? 0)+remaining)
+      }
+      for (const [to,n] of moves) relocateUnits(state,from,to,key,n,report)
+    }
+    report?.notes.push(`Cube quarters: Briton-controlled Population ${before} → ${boardTotals(state).pop.c}.`)
   }
   function combineOrDisband(state,key,from,destinations,faction,input,roll,disband,report) {
     const space = state.land[from]
@@ -4232,14 +4416,30 @@ const epochEconomy = (() => {
       if (com) fields.push(amount('comitates-wealth','Wealth to retain Comitates',0,maxPayment,maxPayment), ...rosterFields(state,['com'],'com-remove-','Remove unpaid Comitates'))
       const maintained = siteNames(keptHills)
       const destinations = hills.length ? [...new Set([...siteNames(siteList(state,'town')),...maintained])] : civSites(state)
-      fields.push(...nearestFields(state,['mil','com'],destinations))
+      if (destinations.length > 1) {
+        for (const from of boxesWith(state,['mil','com']).filter(name => !destinations.includes(name))) {
+          const targets = nearest(from,destinations)
+          if (targets.length < 2) continue
+          for (const key of ['mil','com']) {
+            const current = on(state.land[from],key)
+            const maximum = key === 'mil' ? current-Math.floor(current/3) : current
+            if (!maximum) continue
+            for (const to of targets) {
+              fields.push(amount(cubePrefix(key,from)+to,`${groupLabel(key)} · ${from} → ${to}`,0,maximum,'',true))
+            }
+          }
+        }
+      }
       for (const nation of ['x','s']) {
         const options = siteNames(siteList(state,nation+'s','c'))
         const key = 'c'+nation+'w'
         if (options.length > 1) fields.push(...houseFields(state,key,options))
       }
     }
-    return {help:'Stow Civitates Plunder, thin Militia, pay Comitates, discard Refugees, and redeploy. Active Upkeep capabilities are included.',fields}
+    const help = 'Stow Civitates Plunder, thin Militia, pay Comitates, discard Refugees, and redeploy.'
+    const split = fields.some(field => field.name.startsWith('cube-quarters-'))
+      ? ' For a group with tied nearest Strongholds, assign all its surviving cubes after demobilization. Leave that group blank for automatic allocation.' : ''
+    return {help:help+split,fields}
   }
   function civUpkeep(state,input,roll,report) {
     const gold = clearPlunder(state,['mil','com',...blueFoederati],'wealth')
@@ -4280,9 +4480,7 @@ const epochEconomy = (() => {
     }
     state.tracks.refugees = Math.floor(state.tracks.refugees/2)
     const strongholds = civSites(state)
-    for (const key of ['mil','com']) {
-      for (const from of names) combineOrDisband(state,key,from,strongholds,'c',input,roll,false,report)
-    }
+    civCubeQuarters(state,strongholds,input,roll,report)
     if (!strongholds.length && (troopsOnMap(state,'mil') || troopsOnMap(state,'com'))) {
       report?.notes.push('Militia and Comitates stay in place because no Town or Hillfort remains.')
     }
@@ -4623,21 +4821,29 @@ const epochEconomy = (() => {
   function run(state,phase,input,roll,report) {
     if (phase==='Epoch Event') return runEvent(state,input,roll)
     const faction = phaseFaction[phase]
-    if (report && faction) {
+    ensure(faction,'Unknown Epoch economy phase.')
+    const before = report && names.map(name => control(state,name))
+    if (report) {
       const humanChoice = human(state,faction)
       report.priority = {
         d:humanChoice ? '§6.6.1. Cavalry use maintained Forts and red Foederati use matching Settlements.' :
           '§8.8.7. The Non-player Dux spreads Cavalry evenly among maintained Forts and red Foederati evenly among matching Settlements.',
-        c:humanChoice ? '§6.6.2. Militia and Comitates use the nearest Town or Hillfort. Foederati use blue Settlements of their own Nation.' :
-          '§§6.6.2 and 8.7.7. Militia and Comitates use the nearest Town or Hillfort, choosing by Control when equidistant. Blue Foederati use matching Settlements to maximize Briton-controlled Population, with random ties.',
+        c:humanChoice ? '§6.6.2. Militia and Comitates may split among equally nearest Towns and Hillforts. Foederati use blue Settlements of their own Nation.' :
+          '§§6.6.2 and 8.7.7. Split cubes among equally nearest Towns and Hillforts to maximize Briton-controlled Population. Then assign blue Foederati to matching Settlements by the same Control priority.',
         x:'§6.6.3. Saxon Warbands go to the nearest independent Saxon Stronghold or become Available if none remains.',
         s:'§6.6.3. Scotti Warbands go to the nearest independent Scotti Stronghold or become Available if none remains.',
       }[faction]
     }
-    if (faction==='d') return duxUpkeep(state,input,roll,report)
-    if (faction==='c') return civUpkeep(state,input,roll,report)
-    if (faction) return barbarianUpkeep(state,faction,input,roll,report)
-    throw new Error('Unknown Epoch economy phase.')
+    const note = faction === 'd' ? duxUpkeep(state,input,roll,report) : faction === 'c'
+      ? civUpkeep(state,input,roll,report) : barbarianUpkeep(state,faction,input,roll,report)
+    if (report) {
+      const moved = new Set(report.moves.flatMap(({from,to}) => [from,to]))
+      report.control = names.flatMap((name,index) => {
+        const after = control(state,name)
+        return after !== before[index] || moved.has(name) ? [{name,before:before[index],after}] : []
+      })
+    }
+    return note
   }
   return { choices, run }
 })()
@@ -8977,8 +9183,9 @@ function replayAction(state,job,answers=[]) {
     if (config.reactionFaction) data.push(NAMES[config.reactionFaction]+' forces Battle in '+config.name+'.')
     const report = runBattle(after,config,roll,reply)
     if (report.details.length) data.push(report.name+' · '+report.details.join(' '))
-    if (report.field.length || report.assaults.length) {
-      battles.push({name:report.name,field:report.field,assaults:report.assaults})
+    if (report.field.length || report.assaults.length || report.tactics.length) {
+      battles.push({name:report.name,field:report.field,assaults:report.assaults,
+        ...(report.tactics.length ? {tactics:report.tactics} : {})})
     }
     if (config.afterDeepRaid) finishDeepRaid(config,Math.max(0,report.attackingRaiderSurvivors-report.attackerPlunder),report.attackerEvaded)
     return report
@@ -9123,6 +9330,11 @@ function parseSave(text) {
         // Replan prepared bot actions and retain human command inputs.
         if (job.kind === 'action' && job.requests) delete work.input.battle
         else battle.answers = []
+        delete battle.countDraft
+      } else if (battle.countDraft !== undefined) {
+        const draft = battle.countDraft
+        ensure(draft?.index === answers.length && Array.isArray(draft.values) && draft.values.length > 0 &&
+          draft.values.length <= 24 && draft.values.every(value => inRange(value,0,30)), 'Invalid unconfirmed Omens counts.')
       }
     }
     if (editor !== undefined) ensure(work.draft && (editor === 'tracks' || Object.hasOwn(BY_NAME,editor)), 'Invalid pending board editor.')
@@ -9507,7 +9719,12 @@ function journalEntries(game) {
     if (card && String(entry.card) !== card || epoch && String(entry.epoch) !== epoch) return false
     if (factionName && !entry.title.startsWith(factionName+' · ') &&
         entry.title !== upkeep && entry.title !== factionName+' wins') return false
-    const notes = [entry.title,entry.detail,...entry.dice.map(die => die.label)].join(' ').toLowerCase()
+    const quarters = entry.upkeep
+    const notes = [entry.title,entry.detail,...entry.dice.map(die => die.label),
+      ...(entry.battles ?? []).flatMap(battle => [battle.name,...(battle.tactics ?? [])]),
+      ...(quarters ? [quarters.priority,...quarters.notes,...quarters.control.map(change => change.name),
+        ...quarters.moves.map(({from,to,key}) => `${from} ${to} ${groupLabel(key)}`)] : []),
+    ].join(' ').toLowerCase()
     if (locations.length && !locations.some(name => notes.includes(name))) return false
     const searchable = notes+' #'+entry.card+' '+eventTitle(entry.card).toLowerCase()
     return searchable.includes(search)
@@ -9517,7 +9734,7 @@ function journalList(entries) {
   if (!entries.length) return '<p class="muted">No journal entries match these filters.</p>'
   return `<ul class="journal">${entries.map(entry => `<li><header><strong>${clean(entry.title)}</strong>
     <small class="muted">${entry.card ? '#'+clean(entry.card)+' · ' : ''}${entry.epoch ? 'Epoch '+clean(entry.epoch) : 'Before Epoch 1'}</small></header>
-    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${battleCalculations(entry.battles)}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
+    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${upkeepAllocations(entry.upkeep)}${battleCalculations(entry.battles)}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
 }
 function journal(game) {
   if (!game.log.length) return panel('Campaign journal','<p class="muted">Card reveals, actions and Epoch results will appear here.</p>')
@@ -9605,6 +9822,7 @@ function guideTab(game) {
       '§§3.6.5 and 4.2.4. The app adds Retaliate’s 3 Prestige to the ordinary gains.',
       eventNotes['33/shaded'],
       '§8.8.9. Non-player Dux needs Friendly Control to force a Battle against a Surprise Deep Raid. A human Dux follows §4.4.2 or §4.5.2.',
+      '§8.4.1. The November 2023 Living Rules use friendly placement order for Non-player Withdrawal: Cavalry, Comitates, Warbands, Militia, Raiders, with Plunder first within each type. The 2017 tactics sheet gives the reverse type order. The app uses the 2023 rule.',
       'Errata p.2. Saxons cannot Evade in a Ravage Battle. A captured City loses all its Prosperity, even when the attackers cannot carry it all.',
     ],'Errata and rulings used by the app')}
     ${activeRuleNotes(game)}
@@ -9679,30 +9897,24 @@ function botDecisionMarkup(decision,dice = []) {
   const rolled = dice.length ? ' The recorded rolls below include any random ties.' : ''
   return `<div class="callout small"><strong>Why this action</strong><p>${clean(decision.rule)} · ${clean(decision.detail)}${rolled}</p></div>`
 }
-function upkeepAllocations(report,before,after) {
+function upkeepAllocations(report,open = false) {
   if (!report?.priority) return ''
-  const moved = new Set(report.moves.flatMap(({from,to}) => [from,to]))
-  const rows = REGIONS.flatMap(({name}) => {
-    const a = control(before,name)
-    const b = control(after,name)
-    return a !== b || moved.has(name) ? [{name,a,b}] : []
-  })
   const owner = id => id === 'b' ? 'Britons' : NAMES[id] ?? 'Uncontrolled'
   const moves = report.moves.map(({from,to,key,count}) => `<li>${clean(from)} → ${clean(to)} · ${count} × ${clean(groupLabel(key))}</li>`)
-  return `<section class="callout small"><h3>Upkeep allocations</h3><p>${clean(report.priority)}</p>
+  return `<details class="callout small"${open ? ' open' : ''}><summary>Upkeep allocations</summary><p>${clean(report.priority)}</p>
     ${moves.length ? `<ul class="guide-list">${moves.join('')}</ul>` : '<p>No Troops changed quarters.</p>'}
     ${report.notes.map(note => `<p>${clean(note)}</p>`).join('')}
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Region</th><th>Control before</th><th>Control after</th></tr></thead>
-      <tbody>${rows.map(({name,a,b}) => `<tr><td>${clean(name)}</td><td>${clean(owner(a))}</td><td>${clean(owner(b))}</td></tr>`).join('')}</tbody></table></div>` :
+    ${report.control.length ? `<div class="table-wrap"><table><thead><tr><th>Region</th><th>Control before</th><th>Control after</th></tr></thead>
+      <tbody>${report.control.map(({name,before,after}) => `<tr><td>${clean(name)}</td><td>${clean(owner(before))}</td><td>${clean(owner(after))}</td></tr>`).join('')}</tbody></table></div>` :
       '<p>Control stays the same in every space.</p>'}
-    </section>`
+    </details>`
 }
 function showPreview(plan,back) {
   const endsGame = plan.after.result && !state().result
   const victory = endsGame ? `<section class="callout warm"><h3>${clean(victoryTitle(plan.after))}</h3>${victoryDetails(plan.after)}</section>`
     : plan.label === 'Victory' ? `<p class="muted">The campaign continues to ${clean(plan.after.epochPhase)}.</p>${victoryTable(plan.after)}` : ''
   modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}
-    ${upkeepAllocations(plan.upkeep,state(),plan.after)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
+    ${upkeepAllocations(plan.upkeep,true)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
     ${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
     button('Back','preview-back','ghost',back)+button('Apply result','commit','primary'),'preview')
   pending = { base:state(), after:plan.after, label:plan.label }
@@ -9861,7 +10073,7 @@ function descriptorField(spec,input,prefix = '') {
   const label = clean(spec.label)
   if (spec.type === 'number') return number(label,clean(name),value,spec.min ?? 0,spec.max ?? 80,[required,spec.refresh ? 'data-refresh="yes"' : ''].join(' '))
   if (['check','checkbox'].includes(spec.type)) return `<label class="check"><input type="checkbox" name="${clean(name)}" value="yes" ${defaultFlag(value) ? 'checked' : ''}${spec.refresh ? ' data-refresh="yes"' : ''}> ${label}</label>`
-  if (spec.type === 'text') return field(label,`<input type="text" name="${clean(name)}" value="${clean(value)}" placeholder="${clean(spec.placeholder)}" ${required}>`)
+  if (spec.type === 'text') return field(label,`<input type="text" name="${clean(name)}" value="${clean(value)}" placeholder="${clean(spec.placeholder)}" ${required}>${spec.hint ? `<small class="muted">${clean(spec.hint)}</small>` : ''}`)
   const choices = spec.options.map(option => Array.isArray(option) ? option : [option.value,option.label])
   const select = field(label,`<select name="${clean(name)}" ${required}${spec.refresh ? ' data-refresh="yes"' : ''}>${selectOptions(choices,value)}</select>`)
   const fromMap = prefix && ['space','origin','destination'].includes(spec.key) && choices.some(([key]) => Object.hasOwn(BY_NAME,key))
@@ -9911,12 +10123,16 @@ function repeatCount(spec,key,input) {
   const n = Number(input[key] ?? spec.minRows)
   return Math.max(spec.minRows,Math.min(spec.maxRows,n))
 }
+function operationRowFields(spec,prefix,input) {
+  const mode = input[prefix+'mode'] || spec.rows.find(item => item.key === 'mode')?.default
+  return spec.rows.filter(item => !item.mode || item.mode === mode)
+}
 function repeatedFields(spec,key,input,title) {
   if (!spec) return ''
   const count = repeatCount(spec,key,input)
   const rows = Array.from({length:count},(_,index) => `<fieldset class="operation-row">
     <legend>${title} ${index+1}</legend><div class="fields">
-    ${spec.rows.map(item => descriptorField(item,input,key+index+'-')).join('')}
+    ${operationRowFields(spec,key+index+'-',input).map(item => descriptorField(item,input,key+index+'-')).join('')}
     </div></fieldset>`).join('')
   return `<div class="stack"><p class="muted">${clean(spec.help)}</p>${rows}<div class="row">
     ${count < spec.maxRows ? button('Add '+title.toLowerCase(),'row-add','compact ghost',key) : ''}
@@ -9961,13 +10177,13 @@ function actionSelections(game,faction,input) {
 }
 function targetMap(name) {
   const input = session.work?.input
-  const match = /^(rows|feats)\d+-(space|origin|destination)$/.exec(name)
+  const match = /^(rows|feats)(\d+)-(space|origin|destination)$/.exec(name)
   ensure(input && match,'This map target is no longer available.')
   const game = state()
   const choice = actionSelections(game,activeFaction(game),input)
   const operation = choice.grant?.spec ?? choice.spec
   const rows = match[1] === 'rows' ? operation : operation?.featFields
-  const spec = rows?.rows.find(field => field.key === match[2])
+  const spec = rows && operationRowFields(rows,match[1]+match[2]+'-',input).find(field => field.key === match[3])
   const targets = new Set(spec?.options.map(([key]) => key).filter(key => Object.hasOwn(BY_NAME,key)))
   ensure(targets.size,'No spaces are available for this target.')
   modal(clean(spec.label),renderMap(workBoard(),targets),button('Back to action','action-back','ghost'),'target-map',{name,targets})
@@ -10029,7 +10245,7 @@ function actionDialog(choice = null, guidance = null) {
 }
 function collectRows(spec,key,input) {
   if (!spec) return []
-  const rows = Array.from({length:repeatCount(spec,key,input)},(_,index) => Object.fromEntries(spec.rows.map(item => {
+  const rows = Array.from({length:repeatCount(spec,key,input)},(_,index) => Object.fromEntries(operationRowFields(spec,key+index+'-',input).map(item => {
     return [item.key,input[key+index+'-'+item.key] ?? item.default ?? '']
   })))
   return spec.minRows === 0 ? rows.filter(row => row.space || row.origin) : rows
@@ -10129,7 +10345,9 @@ function battleCalculations(battles = []) {
       <p>Removed · ${clean(losses.join(', ') || 'None')}</p></div>`
   }
   return `<details class="details battle-calculations"><summary>Battle calculations</summary>
-    ${battles.map(({name,field,assaults}) => `<h3>${clean(name)}</h3>${[...field,...assaults].map(step => `<div class="callout small">
+    ${battles.map(({name,field,assaults,tactics}) => `<h3>${clean(name)}</h3>
+      ${tactics?.length ? `<div class="callout small"><strong>Non-player tactics</strong><ul class="guide-list">${tactics.map(line => `<li>${clean(line)}</li>`).join('')}</ul></div>` : ''}
+      ${[...field,...assaults].map(step => `<div class="callout small">
       <strong>${clean(step.phase)} · ${clean(step.stronghold ?? 'Field Battle')}</strong>
       ${step.skipped ? '<p>Coup de Main skips Escalade.</p>' : `<div class="assault-volleys">
         ${volley('Losses to attackers',step.attackers)}${step.defenders ? volley('Losses to defenders',step.defenders) : ''}</div>`}
@@ -10140,6 +10358,12 @@ function resumeBattle() {
   ensure(record,'Start a Battle to make tactical choices.')
   const {job,answers} = record
   const result = replayAction(state(),job,answers)
+  const counts = result.prompt?.counts
+  if (record.countDraft && (!counts || record.countDraft.index !== result.prompt.index || record.countDraft.values.length !== counts.length ||
+      record.countDraft.values.some((value,index) => !inRange(value,0,counts[index].max)))) {
+    delete record.countDraft
+    save()
+  }
   if (!result.prompt) {
     if (job.kind === 'staged') {
       session.work.draft = result.after
@@ -10162,9 +10386,9 @@ function resumeBattle() {
     return
   }
   const {prompt} = result
-  const choiceFields = prompt.counts ? `<div class="fields">${prompt.counts.map(({label,max}) => {
+  const choiceFields = counts ? `<div class="fields">${counts.map(({label,max},index) => {
     const choices = Array.from({length:max+1},(_,n) => [n,n === max ? `All (${max})` : String(n)])
-    return field(clean(label),`<select name="omens-count">${selectOptions(choices,0)}</select>`)
+    return field(clean(label),`<select name="omens-count">${selectOptions(choices,record.countDraft?.values[index] ?? 0)}</select>`)
   }).join('')}</div>` : field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)
   const continueLabel = prompt.counts ? 'Confirm Omens selection' :
     prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'
@@ -10178,7 +10402,14 @@ function resumeBattle() {
     ${prompt.context ? ruleNotes([commandNotes.Battle]) : ''}
     ${diceList(result.dice,true)}`,
     (answers.length ? button('Previous choice','battle-back','ghost') : '')+button('Close Battle','close','ghost'),
-    'battle')
+    'battle',{countIndex:counts ? prompt.index : null})
+}
+function previousTacticalChoice() {
+  const record = session.work.input.battle
+  record.answers.pop()
+  delete record.countDraft
+  save()
+  resumeBattle()
 }
 function eventBattleDialog() {
   const game = state()
@@ -10271,6 +10502,12 @@ function epochDialog() {
   const work = refreshWork('epoch',{hoard:'0'})
   const input = work.input
   const descriptor = epochChoices(game,phase,input)
+  if (phase === 'Civitates Upkeep') {
+    const active = new Set(descriptor.fields.map(item => item.name))
+    for (const key of Object.keys(input)) {
+      if (key.startsWith('cube-quarters-') && !active.has(key)) delete input[key]
+    }
+  }
   let form = ''
   if (phase === 'Annona') {
     form = game.markers[10]?.side === 'unshaded' ? '<p>The active Annona Event skips this phase.</p>' :
@@ -10312,7 +10549,7 @@ function epochPreview() {
     const hoard = isHumanFaction(after,'c') ? Number(input.hoard || 0) : maxHoard(after)
     const note = guided ? input.note?.trim() : epochChoices(after,phase,input) ? runEpochEconomy(after,phase,input,roll,upkeep) : ''
     const replacement = after.deckMode === 'digital' ? upcomingDigitalCard(after) : numOrNull(input.next)
-    const info = {...annona,hoard,note,dice}
+    const info = {...annona,hoard,note,dice,upkeep}
     info.beforeRecovery = () => {
       const stilicho = stilichoRecoveryChoices(after)
       if (stilicho) info.recoveryNote = applyStilichoRecovery(after,isHumanFaction(after,stilicho.faction) ? input : {})
@@ -10339,9 +10576,7 @@ function previewBack(which) {
     const work = session.work
     const job = work?.input.battle?.job
     if (work?.input.battle?.answers.length) {
-      work.input.battle.answers.pop()
-      save()
-      resumeBattle()
+      previousTacticalChoice()
     } else if (job?.kind === 'sample') {
       session.work = null
       save()
@@ -10493,7 +10728,7 @@ function handleAction(action,value) {
       return
     }
     case 'event-battle': eventBattleDialog(); return
-    case 'battle-back': session.work.input.battle.answers.pop(); save(); resumeBattle(); return
+    case 'battle-back': previousTacticalChoice(); return
     case 'battle-demo': openBattleDemo(); return
     case 'resume-battle': prepareAction(resumeBattle); return
     case 'card-detail': cardDetails(Number(value)); return
@@ -10640,6 +10875,8 @@ document.addEventListener('change',async event => {
     if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !target.name.startsWith('eligible') && !/^(rows|feats)\d+-/.test(target.name)))) {
       if (['option','command','feat','side','grant','grantFeat'].includes(target.name)) {
         for (const key of Object.keys(session.work.input)) if (key.startsWith('rows') || key.startsWith('feats')) delete session.work.input[key]
+        delete session.work.input.featTiming
+        delete session.work.input.recycle
         if (target.name === 'side') {
           delete session.work.input.grant
           delete session.work.input.grantFeat
@@ -10661,6 +10898,15 @@ document.addEventListener('input',event => {
   if (!form || !target.name) return
   try {
     if (form.id === 'journal-filters') { updateJournal(form); return }
+    if (form.id === 'battle-form' && target.name === 'omens-count') {
+      const record = session.work.input.battle
+      const index = dialogData?.countIndex
+      if (index === record.answers.length) {
+        record.countDraft = {index,values:new FormData(form).getAll('omens-count').map(Number)}
+        save()
+      }
+      return
+    }
     const descriptor = { 'cards-form':'cards', 'action-form':'action', 'epoch-form':'epoch', 'event-battle-form':'action' }[form.id]
     if (descriptor) changeWork(descriptor,target.name,target.type === 'checkbox' && !target.checked ? '' : target.value)
     if (['annona-blue-spend','annona-wealth-spend'].includes(target.name)) updateAnnonaSummary(form)
@@ -10691,11 +10937,17 @@ document.addEventListener('submit',event => {
       message('New campaign ready.')
     }
     if (form.id === 'battle-form') {
-      const answers = session.work.input.battle.answers
+      const record = session.work.input.battle
+      const {answers,countDraft} = record
       const input = new FormData(form)
+      delete record.countDraft
       answers.push(input.has('omens-count') ? input.getAll('omens-count').join(',') : input.get('answer'))
       try { resumeBattle(); save() }
-      catch (error) { answers.pop(); throw error }
+      catch (error) {
+        answers.pop()
+        if (countDraft) record.countDraft = countDraft
+        throw error
+      }
     }
     if (form.id === 'event-battle-form') {
       const input = Object.fromEntries(new FormData(form))

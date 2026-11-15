@@ -1,5 +1,5 @@
 import { BY_NAME, NAMES, RANDOM_SPACES, REGIONS } from './data.mjs'
-import { availability, boardTotals, changeTrack, clone, control, ensure, goldAvailable, groupLabel, inRange, isFragmentation, isHumanFaction, isRoman, loaded, moveUnits, on, preemption, scores, setImperium, spendCivitates, spendDux, sum } from './position.mjs'
+import { availability, boardTotals, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, inRange, isFragmentation, isHumanFaction, isRoman, loaded, moveUnits, on, piecesByOwner, preemption, scores, setImperium, spendCivitates, spendDux, sum } from './position.mjs'
 import { TEARS_REGIONS } from './scenarios.mjs'
 
 const epochEconomy = (() => {
@@ -319,16 +319,105 @@ const epochEconomy = (() => {
       ensure(possible.includes(input[keyName]),'Choose a qualifying Stronghold for redeployment.')
       return input[keyName]
     }
-    if (faction === 'c' && !human(state,'c')) {
-      const candidates = possible.map(name => {
-        const draft = clone(state)
-        relocateUnits(draft,from,name,key,on(draft.land[from],key))
-        return {name,pop:boardTotals(draft).pop.c}
-      })
-      const best = Math.max(...candidates.map(({pop})=>pop))
-      return randomSpace(candidates.filter(({pop})=>pop===best).map(({name})=>name),roll,'Civitates redeployment')
-    }
     return randomSpace(possible,roll,NAMES[faction]+' redeployment')
+  }
+  function bestCubeQuarters(state,groups,roll) {
+    const slots = groups.flatMap(group => Array(group.count).fill(group))
+    const targets = [...new Set(groups.flatMap(group => group.targets))].flatMap(name => {
+      if (friendlyControl(state,name,'c')) return []
+      const counts = piecesByOwner(state.land[name],{raiders:false})
+      const friendly = counts.c + (isFragmentation(state) ? 0 : counts.d)
+      const need = sum(Object.values(counts))-2*friendly+1
+      const eligible = slots.flatMap((group,index) => group.targets.includes(name) ? [index] : [])
+      return need <= eligible.length ? [{name,need,eligible,pop:state.land[name].pop}] : []
+    }).sort((a,b) => b.pop-a.pop || a.need-b.need)
+
+    // A new Control only needs its threshold. Assign that many distinct legal
+    // cubes, reassigning earlier matches when a later Region has fewer sources.
+    function reserve(target,assigned,visited) {
+      for (const slot of target.eligible) {
+        if (visited.has(slot)) continue
+        visited.add(slot)
+        if (!assigned[slot] || reserve(assigned[slot],assigned,visited)) {
+          assigned[slot] = target
+          return true
+        }
+      }
+      return false
+    }
+    // Ignoring origin restrictions gives an upper bound for the remaining search.
+    const upper = [Array(slots.length+1).fill(0)]
+    for (const {need,pop} of [...targets].reverse()) {
+      const next = upper[0]
+      upper.unshift(next.map((skip,n) => n < need ? skip : Math.max(skip,pop+next[n-need])))
+    }
+    let best = -1
+    let plans = []
+    function search(index,left,pop,assigned) {
+      if (pop+upper[index][left] < best) return
+      const target = targets[index]
+      if (!target) {
+        if (pop > best) { best = pop; plans = [] }
+        plans.push(assigned)
+        return
+      }
+      if (left >= target.need) {
+        const attempt = [...assigned]
+        let matched = 0
+        while (matched < target.need && reserve(target,attempt,new Set())) matched++
+        if (matched === target.need) search(index+1,left-matched,pop+target.pop,attempt)
+      }
+      search(index+1,left,pop,assigned)
+    }
+    search(0,slots.length,0,Array(slots.length).fill(null))
+    return {slots,assigned:plans[randomIndex(plans.length,roll,'Civitates cube quarters · Control tie')]}
+  }
+  const cubePrefix = (key,from) => `cube-quarters-${key}-${from}-`
+  function civCubeQuarters(state,destinations,input,roll,report) {
+    if (!destinations.length) return
+    const flexible = []
+    const player = human(state,'c')
+    const before = report && boardTotals(state).pop.c
+    for (const from of names.filter(name => !destinations.includes(name))) {
+      const targets = nearest(from,destinations)
+      for (const key of ['mil','com']) {
+        const count = on(state.land[from],key)
+        const prefix = cubePrefix(key,from)
+        const explicit = player && Object.keys(input).some(name => name.startsWith(prefix) && hasInput(input,name))
+        const legacy = player && input[`nearest-${key}-${from}`]
+        if (explicit) {
+          const entered = allocation(input,prefix)
+          ensure(Object.keys(entered).every(to => !hasInput(entered,to) || targets.includes(to)),
+            `Choose only nearest Towns or Hillforts for ${groupLabel(key)} from ${from}.`)
+          const counts = targets.map(to => getNumber(entered,to,0,count))
+          ensure(sum(counts) === count,`Assign all ${count} surviving ${groupLabel(key)} from ${from}, or leave that group blank.`)
+          targets.forEach((to,index) => relocateUnits(state,from,to,key,counts[index],report))
+        } else if (count && legacy) {
+          ensure(targets.includes(legacy),'Choose a nearest Town or Hillfort for redeployment.')
+          relocateUnits(state,from,legacy,key,count,report)
+        } else if (count && targets.length === 1) {
+          relocateUnits(state,from,targets[0],key,count,report)
+        } else if (count) {
+          flexible.push({from,key,count,targets,moves:new Map()})
+        }
+      }
+    }
+    if (!flexible.length) return
+    const {slots,assigned} = bestCubeQuarters(state,flexible,roll)
+    for (const [index,target] of assigned.entries()) {
+      if (!target) continue
+      const group = slots[index]
+      group.moves.set(target.name,(group.moves.get(target.name) ?? 0)+1)
+    }
+    for (const {from,key,count,targets,moves} of flexible) {
+      const remaining = count-sum([...moves.values()])
+      if (remaining) {
+        const to = randomSpace(targets,roll,`${groupLabel(key)} quarters · ${from}`)
+        moves.set(to,(moves.get(to) ?? 0)+remaining)
+      }
+      for (const [to,n] of moves) relocateUnits(state,from,to,key,n,report)
+    }
+    report?.notes.push(`Cube quarters: Briton-controlled Population ${before} → ${boardTotals(state).pop.c}.`)
   }
   function combineOrDisband(state,key,from,destinations,faction,input,roll,disband,report) {
     const space = state.land[from]
@@ -446,14 +535,30 @@ const epochEconomy = (() => {
       if (com) fields.push(amount('comitates-wealth','Wealth to retain Comitates',0,maxPayment,maxPayment), ...rosterFields(state,['com'],'com-remove-','Remove unpaid Comitates'))
       const maintained = siteNames(keptHills)
       const destinations = hills.length ? [...new Set([...siteNames(siteList(state,'town')),...maintained])] : civSites(state)
-      fields.push(...nearestFields(state,['mil','com'],destinations))
+      if (destinations.length > 1) {
+        for (const from of boxesWith(state,['mil','com']).filter(name => !destinations.includes(name))) {
+          const targets = nearest(from,destinations)
+          if (targets.length < 2) continue
+          for (const key of ['mil','com']) {
+            const current = on(state.land[from],key)
+            const maximum = key === 'mil' ? current-Math.floor(current/3) : current
+            if (!maximum) continue
+            for (const to of targets) {
+              fields.push(amount(cubePrefix(key,from)+to,`${groupLabel(key)} · ${from} → ${to}`,0,maximum,'',true))
+            }
+          }
+        }
+      }
       for (const nation of ['x','s']) {
         const options = siteNames(siteList(state,nation+'s','c'))
         const key = 'c'+nation+'w'
         if (options.length > 1) fields.push(...houseFields(state,key,options))
       }
     }
-    return {help:'Stow Civitates Plunder, thin Militia, pay Comitates, discard Refugees, and redeploy. Active Upkeep capabilities are included.',fields}
+    const help = 'Stow Civitates Plunder, thin Militia, pay Comitates, discard Refugees, and redeploy.'
+    const split = fields.some(field => field.name.startsWith('cube-quarters-'))
+      ? ' For a group with tied nearest Strongholds, assign all its surviving cubes after demobilization. Leave that group blank for automatic allocation.' : ''
+    return {help:help+split,fields}
   }
   function civUpkeep(state,input,roll,report) {
     const gold = clearPlunder(state,['mil','com',...blueFoederati],'wealth')
@@ -494,9 +599,7 @@ const epochEconomy = (() => {
     }
     state.tracks.refugees = Math.floor(state.tracks.refugees/2)
     const strongholds = civSites(state)
-    for (const key of ['mil','com']) {
-      for (const from of names) combineOrDisband(state,key,from,strongholds,'c',input,roll,false,report)
-    }
+    civCubeQuarters(state,strongholds,input,roll,report)
     if (!strongholds.length && (troopsOnMap(state,'mil') || troopsOnMap(state,'com'))) {
       report?.notes.push('Militia and Comitates stay in place because no Town or Hillfort remains.')
     }
@@ -837,21 +940,29 @@ const epochEconomy = (() => {
   function run(state,phase,input,roll,report) {
     if (phase==='Epoch Event') return runEvent(state,input,roll)
     const faction = phaseFaction[phase]
-    if (report && faction) {
+    ensure(faction,'Unknown Epoch economy phase.')
+    const before = report && names.map(name => control(state,name))
+    if (report) {
       const humanChoice = human(state,faction)
       report.priority = {
         d:humanChoice ? '§6.6.1. Cavalry use maintained Forts and red Foederati use matching Settlements.' :
           '§8.8.7. The Non-player Dux spreads Cavalry evenly among maintained Forts and red Foederati evenly among matching Settlements.',
-        c:humanChoice ? '§6.6.2. Militia and Comitates use the nearest Town or Hillfort. Foederati use blue Settlements of their own Nation.' :
-          '§§6.6.2 and 8.7.7. Militia and Comitates use the nearest Town or Hillfort, choosing by Control when equidistant. Blue Foederati use matching Settlements to maximize Briton-controlled Population, with random ties.',
+        c:humanChoice ? '§6.6.2. Militia and Comitates may split among equally nearest Towns and Hillforts. Foederati use blue Settlements of their own Nation.' :
+          '§§6.6.2 and 8.7.7. Split cubes among equally nearest Towns and Hillforts to maximize Briton-controlled Population. Then assign blue Foederati to matching Settlements by the same Control priority.',
         x:'§6.6.3. Saxon Warbands go to the nearest independent Saxon Stronghold or become Available if none remains.',
         s:'§6.6.3. Scotti Warbands go to the nearest independent Scotti Stronghold or become Available if none remains.',
       }[faction]
     }
-    if (faction==='d') return duxUpkeep(state,input,roll,report)
-    if (faction==='c') return civUpkeep(state,input,roll,report)
-    if (faction) return barbarianUpkeep(state,faction,input,roll,report)
-    throw new Error('Unknown Epoch economy phase.')
+    const note = faction === 'd' ? duxUpkeep(state,input,roll,report) : faction === 'c'
+      ? civUpkeep(state,input,roll,report) : barbarianUpkeep(state,faction,input,roll,report)
+    if (report) {
+      const moved = new Set(report.moves.flatMap(({from,to}) => [from,to]))
+      report.control = names.flatMap((name,index) => {
+        const after = control(state,name)
+        return after !== before[index] || moved.has(name) ? [{name,before:before[index],after}] : []
+      })
+    }
+    return note
   }
   return { choices, run }
 })()

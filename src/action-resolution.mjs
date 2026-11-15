@@ -65,8 +65,9 @@ export function replayAction(state,job,answers=[]) {
     if (config.reactionFaction) data.push(NAMES[config.reactionFaction]+' forces Battle in '+config.name+'.')
     const report = runBattle(after,config,roll,reply)
     if (report.details.length) data.push(report.name+' · '+report.details.join(' '))
-    if (report.field.length || report.assaults.length) {
-      battles.push({name:report.name,field:report.field,assaults:report.assaults})
+    if (report.field.length || report.assaults.length || report.tactics.length) {
+      battles.push({name:report.name,field:report.field,assaults:report.assaults,
+        ...(report.tactics.length ? {tactics:report.tactics} : {})})
     }
     if (config.afterDeepRaid) finishDeepRaid(config,Math.max(0,report.attackingRaiderSurvivors-report.attackerPlunder),report.attackerEvaded)
     return report

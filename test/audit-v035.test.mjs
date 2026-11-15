@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { replayAction } from '../src/action-resolution.mjs'
 import { runBattle } from '../src/battle.mjs'
 import { runCommandFeat } from '../src/commands.mjs'
+import { VERSION } from '../src/data.mjs'
 import { runEpochEconomy } from '../src/epoch-economy.mjs'
 import { militaryFields, runMilitary } from '../src/operations.mjs'
 import { availability, boardTotals, makeRoller } from '../src/position.mjs'
@@ -16,7 +17,12 @@ function fixture(name) {
 }
 const quarters = () => parseSave(fixture('F1-bot-quarters')).game
 const entreat = () => parseSave(fixture('F2-battle-entreat')).game
-const omens = () => parseSave(fixture('F3-omens-assault'))
+const omens = () => {
+  // Replay the constructed Battle as a current job. The upgrade test below
+  // separately verifies that a pending bot plan from an old release is cleared.
+  const save = JSON.parse(fixture('F3-omens-assault'))
+  return parseSave(JSON.stringify({...save,version:VERSION}))
+}
 
 test('§§6.6.2 and 8.7.7: bot Foederati maximize controlled Population across matching Settlements', () => {
   const game = quarters()

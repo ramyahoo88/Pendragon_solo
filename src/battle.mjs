@@ -159,6 +159,10 @@ export function runBattle(state,config,roll,reply = null) {
   const details = []
   const field = []
   const assaults = []
+  const tacticsNotes = []
+  const explain = (faction,step,line) => {
+    if (!config.ignoreTactics && !humanSide(state,faction)) tacticsNotes.push(`§8.4.2 · ${step} · ${NAMES[faction]} · ${line}`)
+  }
   const bellorum = (units,lead,fortDefends = false) => {
     if (!activeSide(state,16,'shaded') || !units.some(unit => unit.key === 'mil') ||
       !(fortDefends || units.some(unit => unit.owner === 'd'))) return units
@@ -324,12 +328,37 @@ export function runBattle(state,config,roll,reply = null) {
   }
   const traps = unit => (config.trap?.includes(unit.key) && (!config.trapSide || config.trapSide === 'attacker' && participants.includes(unit) || config.trapSide === 'defender' && defenders.includes(unit))) ||
     (activeSide(state,56,'shaded') && attacker === 's' && BY_NAME[name].terrain === 'Hills' && commandBattle(config.source) && unit.key === 'sw')
+  const fieldStages = [
+    ['Trap',traps],
+    ['Charge / Ambush',unit => unit.key === 'cav' || unit.ambush],
+    ['Melee',unit => !isRaider(unit.key)],
+    ['Harass',unit => isRaider(unit.key)],
+  ]
+  const struck = new Set()
+  function defenderTactic({raiders,home,hasWarbands,mayEvade,ravaging,outnumbered}) {
+    if (home) {
+      if (raiders && ravaging) return ['ambush','Ravaging Saxon Raiders cannot Evade.']
+      if (raiders && !hasWarbands && mayEvade) return ['evade','Raiders are alone in Home terrain.']
+      const troopEvades = mayEvade && outnumbered && !sites.length
+      const reason = troopEvades ? 'Outnumbered with no friendly Stronghold.' :
+        !mayEvade ? 'Evasion is barred.' : sites.length ? 'A friendly Stronghold is present.' : 'The defending side is not outnumbered.'
+      return [troopEvades ? 'evade' : 'ambush',raiders && hasWarbands ? 'Raiders follow their Warbands. '+reason : reason]
+    }
+    if (!mayEvade) return ['none','Evasion is barred in this Battle.']
+    if (!hasWarbands) return ['evade','Raiders are fighting without Warbands.']
+    // Enemy tactics have already resolved. Project the remaining Field Battle
+    // with the Raiders and Warbands standing together before any Withdrawal.
+    return projectedFieldRemovals([],true) > 0
+      ? ['none','The defending force can remove an enemy in the field.']
+      : ['evade','The defending force would remove no enemy in the field.']
+  }
   function tactics(units,isAttacker) {
     if (config.ignoreTactics) {
       if (!isAttacker && config.defenderAmbush) for (const unit of units) unit.ambush = homeTerrain(state,name,unit)
       return
     }
     const rough = ['Fens','Hills'].includes(BY_NAME[name].terrain)
+    const outnumbered = present(defenders).length < present(participants).length
     for (const raiders of [true,false]) {
       for (const faction of [...new Set(units.map(unit => unit.owner))]) {
         const eligible = units.filter(unit => unit.owner === faction && (raiders ? isRaider(unit.key) : !isRaider(unit.key) && homeTerrain(state,name,unit)))
@@ -339,13 +368,19 @@ export function runBattle(state,config,roll,reply = null) {
         const options = [{value:'none',label:'Stand and fight'}]
         if (mayEvade) options.push({value:'evade',label:'Attempt Evasion'})
         if (home) options.push({value:'ambush',label:'Attempt Ambush'})
-        const enemies = isAttacker ? defenders : participants
-        const enemyWeight = enemies.reduce((total,unit) => total+unitStrength(unit),0)
-        const ownWeight = units.reduce((total,unit) => total+unitStrength(unit),0)
-        const defaultMove = isAttacker ? (home && !eligible.every(traps) ? 'ambush' : 'none') : (mayEvade && (raiders && (!home || ownWeight < enemyWeight) || !raiders && !sites.length && ownWeight < enemyWeight) ? 'evade' : home ? 'ambush' : 'none')
-        const tactic = choose('Pre-Battle',`${NAMES[faction]} ${raiders ? 'Raiders' : 'Troops in Home Terrain'}`,options,defaultMove,humanSide(state,faction))
-        if (tactic === 'none') continue
+        const hasWarbands = units.some(unit => unit.owner === faction && isBand(unit.key))
+        const [defaultMove,reason] = isAttacker
+          ? eligible.every(traps) ? ['none','Eligible Units already strike at Trap.'] :
+            home ? ['ambush','Eligible Units can Ambush in Home terrain.'] : ['none','Attacking Raiders have no Home Ambush.']
+          : defenderTactic({raiders,home,hasWarbands,mayEvade,ravaging:config.ravage && faction === 'x',outnumbered})
+        const group = raiders ? 'Raiders' : 'Troops in Home Terrain'
+        const tactic = choose('Pre-Battle',`${NAMES[faction]} ${group}`,options,defaultMove,humanSide(state,faction))
         const threshold = tactic === 'ambush' ? raiders ? 5 : 3 : raiders ? home ? 4 : rough ? 5 : 6 : 5
+        const target = threshold === 6 ? '6' : `${threshold}–6`
+        const action = tactic === 'none' ? 'Stand and fight' : tactic === 'evade' ? `Evade on ${target}` : `Ambush on ${target}`
+        const note = tactic === 'none' && isAttacker && eligible.every(traps) ? reason : `${action}. ${reason}`
+        explain(faction,`${isAttacker ? 'Attacking' : 'Defending'} ${group}`,note)
+        if (tactic === 'none') continue
         const raw = roll(6,`${NAMES[faction]} ${tactic} · ${name}`)
         const n = raw+(isAttacker ? 0 : config.defenderTacticsModifier ?? 0)
         for (const unit of eligible) {
@@ -372,13 +407,6 @@ export function runBattle(state,config,roll,reply = null) {
   if (config.afterPlunder) config.afterPlunder()
   tactics(participants,true)
   tactics(defenders,false)
-  const fieldStages = [
-    ['Trap',traps],
-    ['Charge / Ambush',unit => unit.key === 'cav' || unit.ambush],
-    ['Melee',unit => !isRaider(unit.key)],
-    ['Harass',unit => isRaider(unit.key)],
-  ]
-  const struck = new Set()
   function fieldVolley(a,d,selector,spent,survives = stillPresent) {
     if (!a.length || !d.length) return
     const aHits = a.filter(unit => !spent.has(unit.id) && selector(unit))
@@ -420,14 +448,14 @@ export function runBattle(state,config,roll,reply = null) {
     })
     details.push(`${stage}: attackers take ${qty(aLoss/2)}, defenders take ${qty(dLoss/2)}.`)
   }
-  function projectedFieldRemovals(withdrawn = []) {
+  function projectedFieldRemovals(withdrawn = [],includeTrap = false) {
     const dead = new Set()
     const spent = new Set(struck)
     const aField = inField(participants)
     const dField = inField(defenders).filter(unit => !withdrawn.includes(unit))
     const survives = unit => stillPresent(unit) && !dead.has(unit)
-    // Trap and the pre-Battle dice are already resolved when Withdrawal is offered.
-    for (const [,selector] of fieldStages.slice(1)) {
+    // Withdrawal is evaluated after Trap; the earlier Evasion decision includes Trap.
+    for (const [,selector] of fieldStages.slice(includeTrap ? 0 : 1)) {
       const a = aField.filter(survives)
       const d = dField.filter(survives)
       const volley = fieldVolley(a,d,selector,spent,survives)
@@ -532,6 +560,11 @@ export function runBattle(state,config,roll,reply = null) {
         if (!admitsAlly(site,side,'Withdrawal')) { stay.add(unit.id); continue }
         for (const piece of together ? matching.slice(0,remainingCapacity(site)) : [unit]) piece.site = site.index
       }
+      const retreats = sortedSites.flatMap(site => {
+        const count = factionUnits.filter(unit => unit.site === site.index).length
+        return count ? [`${count} to ${BY_NAME[name].sites[site.index].name}`] : []
+      })
+      if (retreats.length) explain(side,'Withdrawal',`Withdraw ${retreats.join(', ')} to defend the Strongholds.`)
     }
     const withdrawn = defenders.filter(unit => unit.site !== null && !unit.dead).length
     if (withdrawn) details.push(`${withdrawn} defending ${withdrawn === 1 ? 'Unit withdraws' : 'Units withdraw'}.`)
@@ -551,18 +584,22 @@ export function runBattle(state,config,roll,reply = null) {
       if (site) {
         unit.site = site.index
         details.push('Cavalry withdraws after its Charge into '+BY_NAME[name].sites[unit.site].name+'.')
+        explain(unit.owner,'Withdrawal','Cair Legion withdraws Cavalry after Charge / Ambush.')
       }
     }
   }
   for (const stage of fieldStages.slice(2)) fieldStep(...stage)
 
-  function capturedGold(amount,allowCavalry,limitedToAttacker=false) {
-    const eligible = present(participants).filter(unit => !unit.gold && (allowCavalry || unit.key !== 'cav') && (!limitedToAttacker || unit.owner === attacker)).sort(byFriendlyPiece)
+  function capturedGold(amount,allowCavalry) {
+    const player = humanSide(state,attacker)
+    const eligible = present(participants).filter(unit => !unit.gold && (allowCavalry || unit.key !== 'cav'))
+      .sort((a,b) => (player ? 0 : Number(b.owner === attacker)-Number(a.owner === attacker)) || byFriendlyPiece(a,b))
     const take = Math.min(amount,goldAvailable(state),eligible.length)
     for (const unit of eligible.slice(0,take)) {
       unit.gold = true
       land.units[unit.key][1]++
     }
+    if (take) explain(attacker,'Battle consequences',`Assign ${take} Plunder to the acting faction first, then to allies with room.`)
     return take
   }
   if (present(participants).length && !inField(defenders).length && !config.ravage && !config.noAssault && !config.siegeOnly) {
@@ -572,10 +609,14 @@ export function runBattle(state,config,roll,reply = null) {
       const preferred = [...left].sort((a,b)=>insideOf(a).length-insideOf(b).length).find(site=>projectedAssault(site,insideOf(site)).captures)
       const options = [{value:'none',label:'Skip Assault'},...left.map(site => ({value:String(site.index),label:BY_NAME[name].sites[site.index].name+' · '+PIECES[site.piece]}))]
       const selected = choose('Assault','Choose a Stronghold to assault',options,preferred ? String(preferred.index) : 'none',humanSide(state,attacker) && !config.ignoreTactics)
-      if (selected === 'none') break
+      if (selected === 'none') {
+        explain(attacker,'Assault','Skip Assault because no remaining Stronghold can be captured.')
+        break
+      }
       const site = left.find(item => item.index === Number(selected))
       const inside = insideOf(site)
       const stronghold = BY_NAME[name].sites[site.index].name
+      explain(attacker,'Assault',`Attack ${stronghold}, a capturable Stronghold with the fewest Withdrawn units among the targets that can fall.`)
       useOmens('assault',[...present(participants),...inside],stronghold)
       site.used = true
       const assailants = present(participants)
@@ -650,15 +691,24 @@ export function runBattle(state,config,roll,reply = null) {
   const removedGold = defenders.filter(unit => unit.dead && unit.gold).length
   if (removedGold > 0) {
     const options = [{value:'carry',label:'Keep up to half on participating Units'}, {value:'leave',label:'Leave removed Plunder off board'}]
-    if (briton(attacker)) options.push({value:'restore',label:'Return one cube as Prosperity'})
+    const prosperCap = 2*(BY_NAME[name].terrain === 'City' ? BY_NAME[name].printed : land.pop)
+    const canRestore = briton(attacker) && totalProsperity(land) < prosperCap && goldAvailable(state) > 0
+    if (canRestore) options.push({value:'restore',label:'Return one cube as Prosperity'})
     if (!briton(attacker) && friendlyControl(state,name,attacker)) options.push({value:'renown',label:'Gain Renown for each removed cube'})
     const carry = Math.floor(removedGold / 2)
-    const canCarry = carry && present(participants).some(unit => !unit.gold && unit.key !== 'cav')
-    const preferred = attacker === 'd' && !canCarry ? 'restore' : options.some(item => item.value === 'renown') ? 'renown' : canCarry ? 'carry' : 'leave'
-    const result = choose('Consequences',`Use ${removedGold} removed Plunder?`,options,preferred,humanSide(state,attacker) && !config.ignoreTactics)
+    const canCarry = carry > 0 && goldAvailable(state) > 0 && present(participants).some(unit => !unit.gold && unit.key !== 'cav')
+    const player = humanSide(state,attacker)
+    const restore = attacker === 'd' && canRestore && (player ? !canCarry : !isFragmentation(state))
+    const preferred = restore ? 'restore' : player && options.some(item => item.value === 'renown') ? 'renown' : canCarry ? 'carry' : 'leave'
+    const result = choose('Consequences',`Use ${removedGold} removed Plunder?`,options,preferred,player && !config.ignoreTactics)
     if (result === 'carry') capturedGold(carry,false)
-    if (result === 'restore') addProsperity(state,name,1)
+    if (result === 'restore') {
+      addProsperity(state,name,1)
+      details.push(`${NAMES[attacker]} restores one Prosperity from removed Plunder.`)
+      explain(attacker,'Battle consequences','Restore Prosperity when able before Fragmentation.')
+    }
     if (result === 'renown') changeTrack(state,attacker,removedGold)
+    if (result === 'leave') explain(attacker,'Battle consequences','Leave Plunder off board because the bot cannot carry or restore it under its Battle rules.')
   }
   if (config.retaliate && attacker === 'd' && destroyed.length && sites.filter(site => site.owner === defender).every(site => site.destroyed)) {
     changeTrack(state,'prestige',3)
@@ -666,18 +716,25 @@ export function runBattle(state,config,roll,reply = null) {
   }
   if (!inField(defenders).length && !config.noSiege) {
     let spare = present(participants).filter(unit => !isRaider(unit.key)).length
-    for (const site of sortedSites) {
-      if (site.used || site.destroyed || spare < site.capacity) continue
-      const troops = present(defenders).filter(unit => unit.site === site.index)
-      if (!troops.length) continue
+    const targets = sortedSites.flatMap(site => {
+      if (site.used || site.destroyed || spare < site.capacity) return []
+      const troops = insideOf(site).sort(byLossPriority)
+      return troops.length ? [{site,troops,forced:troops[0]}] : []
+    })
+    if (!humanSide(state,attacker)) targets.sort((a,b) =>
+      pieceOrder[GROUP[a.forced.key].piece]-pieceOrder[GROUP[b.forced.key].piece] ||
+      Number(b.forced.gold)-Number(a.forced.gold) || siteSort(a.site,b.site))
+    for (const {site,troops,forced} of targets) {
+      if (spare < site.capacity) continue
       const siege = choose('Siege','Besiege '+BY_NAME[name].sites[site.index].name+'?',[
         {value:'yes',label:'Besiege · commit '+site.capacity+' Troops'}, {value:'no',label:'Skip Siege'},
       ],'yes',humanSide(state,attacker) && !config.ignoreTactics)
       if (siege === 'no') continue
       spare -= site.capacity
-      const target = pickUnit('Siege','Select one Unit lost to Siege',troops,[...troops].sort(byLossPriority)[0],troops.some(unit => humanSide(state,unit.owner)) && !config.ignoreTactics)
+      const target = pickUnit('Siege','Select one Unit lost to Siege',troops,forced,troops.some(unit => humanSide(state,unit.owner)) && !config.ignoreTactics)
       kill(target,state,land)
       details.push(`Siege removes ${labelUnit(target)} at ${BY_NAME[name].sites[site.index].name}.`)
+      explain(attacker,'Siege',`Besiege ${BY_NAME[name].sites[site.index].name}; its forced loss is ${labelUnit(forced)} or a higher-priority Unit.`)
     }
   }
   const removedAtt = participants.filter(unit => unit.dead).map(labelUnit)
@@ -685,7 +742,7 @@ export function runBattle(state,config,roll,reply = null) {
   if (removedAtt.length) details.push(`Attacker losses · ${removedAtt.join(', ')}.`)
   if (removedDef.length) details.push(`Defender losses · ${removedDef.join(', ')}.`)
   return {
-    name, attacker, defender, details, field, assaults, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
+    name, attacker, defender, details, field, assaults, tactics:tacticsNotes, destroyed, destroyedPieces, cavalryLosses:[...participants,...defenders].filter(unit => unit.key === 'cav' && unit.dead).length, attackerLosses:removedAtt.length, defenderLosses:removedDef.length+destroyed.length,
     prestigeChange:state.tracks.prestige-prestigeBefore, renownChange:(state.tracks[attacker] ?? 0)-renownBefore,
     defenderField:inField(defenders).length, attackerField:inField(participants).length,
     defenderStanding:present(defenders).length, attackerPlunder:present(participants).filter(unit => unit.gold).length,

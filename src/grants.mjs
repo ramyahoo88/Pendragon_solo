@@ -105,7 +105,6 @@ export function grantOperation(state,id,faction,side,input,restriction = {}) {
   const options = {...rule.options,tradeAll:picked(input.tradeAll)}
   let spec = command && (!rule.featChoice || rule.optionalFeat || feat) ?
     commandFields(staged,owner,command,feat,options) ?? militaryFields(staged,owner,command,feat,options,input) : null
-  if (spec && id === 23) spec = {...spec,featFields:{...spec.featFields,minRows:0}}
   if (spec && rule.options.troopsOnly) {
     const ignored = owner === 'd' ? ['restore'] : ['mode','site','newHillSite','hillSite']
     spec = {...spec,rows:spec.rows.filter(field => !ignored.includes(field.key))}

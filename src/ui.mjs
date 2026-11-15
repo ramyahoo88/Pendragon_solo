@@ -363,7 +363,12 @@ function journalEntries(game) {
     if (card && String(entry.card) !== card || epoch && String(entry.epoch) !== epoch) return false
     if (factionName && !entry.title.startsWith(factionName+' · ') &&
         entry.title !== upkeep && entry.title !== factionName+' wins') return false
-    const notes = [entry.title,entry.detail,...entry.dice.map(die => die.label)].join(' ').toLowerCase()
+    const quarters = entry.upkeep
+    const notes = [entry.title,entry.detail,...entry.dice.map(die => die.label),
+      ...(entry.battles ?? []).flatMap(battle => [battle.name,...(battle.tactics ?? [])]),
+      ...(quarters ? [quarters.priority,...quarters.notes,...quarters.control.map(change => change.name),
+        ...quarters.moves.map(({from,to,key}) => `${from} ${to} ${groupLabel(key)}`)] : []),
+    ].join(' ').toLowerCase()
     if (locations.length && !locations.some(name => notes.includes(name))) return false
     const searchable = notes+' #'+entry.card+' '+eventTitle(entry.card).toLowerCase()
     return searchable.includes(search)
@@ -373,7 +378,7 @@ function journalList(entries) {
   if (!entries.length) return '<p class="muted">No journal entries match these filters.</p>'
   return `<ul class="journal">${entries.map(entry => `<li><header><strong>${clean(entry.title)}</strong>
     <small class="muted">${entry.card ? '#'+clean(entry.card)+' · ' : ''}${entry.epoch ? 'Epoch '+clean(entry.epoch) : 'Before Epoch 1'}</small></header>
-    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${battleCalculations(entry.battles)}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
+    ${entry.detail ? `<p class="small">${clean(entry.detail)}</p>` : ''}${upkeepAllocations(entry.upkeep)}${battleCalculations(entry.battles)}${diceList(entry.dice,true)}</li>`).join('')}</ul>`
 }
 function journal(game) {
   if (!game.log.length) return panel('Campaign journal','<p class="muted">Card reveals, actions and Epoch results will appear here.</p>')
@@ -461,6 +466,7 @@ function guideTab(game) {
       '§§3.6.5 and 4.2.4. The app adds Retaliate’s 3 Prestige to the ordinary gains.',
       eventNotes['33/shaded'],
       '§8.8.9. Non-player Dux needs Friendly Control to force a Battle against a Surprise Deep Raid. A human Dux follows §4.4.2 or §4.5.2.',
+      '§8.4.1. The November 2023 Living Rules use friendly placement order for Non-player Withdrawal: Cavalry, Comitates, Warbands, Militia, Raiders, with Plunder first within each type. The 2017 tactics sheet gives the reverse type order. The app uses the 2023 rule.',
       'Errata p.2. Saxons cannot Evade in a Ravage Battle. A captured City loses all its Prosperity, even when the attackers cannot carry it all.',
     ],'Errata and rulings used by the app')}
     ${activeRuleNotes(game)}
@@ -535,30 +541,24 @@ function botDecisionMarkup(decision,dice = []) {
   const rolled = dice.length ? ' The recorded rolls below include any random ties.' : ''
   return `<div class="callout small"><strong>Why this action</strong><p>${clean(decision.rule)} · ${clean(decision.detail)}${rolled}</p></div>`
 }
-function upkeepAllocations(report,before,after) {
+function upkeepAllocations(report,open = false) {
   if (!report?.priority) return ''
-  const moved = new Set(report.moves.flatMap(({from,to}) => [from,to]))
-  const rows = REGIONS.flatMap(({name}) => {
-    const a = control(before,name)
-    const b = control(after,name)
-    return a !== b || moved.has(name) ? [{name,a,b}] : []
-  })
   const owner = id => id === 'b' ? 'Britons' : NAMES[id] ?? 'Uncontrolled'
   const moves = report.moves.map(({from,to,key,count}) => `<li>${clean(from)} → ${clean(to)} · ${count} × ${clean(groupLabel(key))}</li>`)
-  return `<section class="callout small"><h3>Upkeep allocations</h3><p>${clean(report.priority)}</p>
+  return `<details class="callout small"${open ? ' open' : ''}><summary>Upkeep allocations</summary><p>${clean(report.priority)}</p>
     ${moves.length ? `<ul class="guide-list">${moves.join('')}</ul>` : '<p>No Troops changed quarters.</p>'}
     ${report.notes.map(note => `<p>${clean(note)}</p>`).join('')}
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Region</th><th>Control before</th><th>Control after</th></tr></thead>
-      <tbody>${rows.map(({name,a,b}) => `<tr><td>${clean(name)}</td><td>${clean(owner(a))}</td><td>${clean(owner(b))}</td></tr>`).join('')}</tbody></table></div>` :
+    ${report.control.length ? `<div class="table-wrap"><table><thead><tr><th>Region</th><th>Control before</th><th>Control after</th></tr></thead>
+      <tbody>${report.control.map(({name,before,after}) => `<tr><td>${clean(name)}</td><td>${clean(owner(before))}</td><td>${clean(owner(after))}</td></tr>`).join('')}</tbody></table></div>` :
       '<p>Control stays the same in every space.</p>'}
-    </section>`
+    </details>`
 }
 function showPreview(plan,back) {
   const endsGame = plan.after.result && !state().result
   const victory = endsGame ? `<section class="callout warm"><h3>${clean(victoryTitle(plan.after))}</h3>${victoryDetails(plan.after)}</section>`
     : plan.label === 'Victory' ? `<p class="muted">The campaign continues to ${clean(plan.after.epochPhase)}.</p>${victoryTable(plan.after)}` : ''
   modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}
-    ${upkeepAllocations(plan.upkeep,state(),plan.after)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
+    ${upkeepAllocations(plan.upkeep,true)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
     ${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
     button('Back','preview-back','ghost',back)+button('Apply result','commit','primary'),'preview')
   pending = { base:state(), after:plan.after, label:plan.label }
@@ -717,7 +717,7 @@ function descriptorField(spec,input,prefix = '') {
   const label = clean(spec.label)
   if (spec.type === 'number') return number(label,clean(name),value,spec.min ?? 0,spec.max ?? 80,[required,spec.refresh ? 'data-refresh="yes"' : ''].join(' '))
   if (['check','checkbox'].includes(spec.type)) return `<label class="check"><input type="checkbox" name="${clean(name)}" value="yes" ${defaultFlag(value) ? 'checked' : ''}${spec.refresh ? ' data-refresh="yes"' : ''}> ${label}</label>`
-  if (spec.type === 'text') return field(label,`<input type="text" name="${clean(name)}" value="${clean(value)}" placeholder="${clean(spec.placeholder)}" ${required}>`)
+  if (spec.type === 'text') return field(label,`<input type="text" name="${clean(name)}" value="${clean(value)}" placeholder="${clean(spec.placeholder)}" ${required}>${spec.hint ? `<small class="muted">${clean(spec.hint)}</small>` : ''}`)
   const choices = spec.options.map(option => Array.isArray(option) ? option : [option.value,option.label])
   const select = field(label,`<select name="${clean(name)}" ${required}${spec.refresh ? ' data-refresh="yes"' : ''}>${selectOptions(choices,value)}</select>`)
   const fromMap = prefix && ['space','origin','destination'].includes(spec.key) && choices.some(([key]) => Object.hasOwn(BY_NAME,key))
@@ -767,12 +767,16 @@ function repeatCount(spec,key,input) {
   const n = Number(input[key] ?? spec.minRows)
   return Math.max(spec.minRows,Math.min(spec.maxRows,n))
 }
+function operationRowFields(spec,prefix,input) {
+  const mode = input[prefix+'mode'] || spec.rows.find(item => item.key === 'mode')?.default
+  return spec.rows.filter(item => !item.mode || item.mode === mode)
+}
 function repeatedFields(spec,key,input,title) {
   if (!spec) return ''
   const count = repeatCount(spec,key,input)
   const rows = Array.from({length:count},(_,index) => `<fieldset class="operation-row">
     <legend>${title} ${index+1}</legend><div class="fields">
-    ${spec.rows.map(item => descriptorField(item,input,key+index+'-')).join('')}
+    ${operationRowFields(spec,key+index+'-',input).map(item => descriptorField(item,input,key+index+'-')).join('')}
     </div></fieldset>`).join('')
   return `<div class="stack"><p class="muted">${clean(spec.help)}</p>${rows}<div class="row">
     ${count < spec.maxRows ? button('Add '+title.toLowerCase(),'row-add','compact ghost',key) : ''}
@@ -817,13 +821,13 @@ function actionSelections(game,faction,input) {
 }
 function targetMap(name) {
   const input = session.work?.input
-  const match = /^(rows|feats)\d+-(space|origin|destination)$/.exec(name)
+  const match = /^(rows|feats)(\d+)-(space|origin|destination)$/.exec(name)
   ensure(input && match,'This map target is no longer available.')
   const game = state()
   const choice = actionSelections(game,activeFaction(game),input)
   const operation = choice.grant?.spec ?? choice.spec
   const rows = match[1] === 'rows' ? operation : operation?.featFields
-  const spec = rows?.rows.find(field => field.key === match[2])
+  const spec = rows && operationRowFields(rows,match[1]+match[2]+'-',input).find(field => field.key === match[3])
   const targets = new Set(spec?.options.map(([key]) => key).filter(key => Object.hasOwn(BY_NAME,key)))
   ensure(targets.size,'No spaces are available for this target.')
   modal(clean(spec.label),renderMap(workBoard(),targets),button('Back to action','action-back','ghost'),'target-map',{name,targets})
@@ -885,7 +889,7 @@ function actionDialog(choice = null, guidance = null) {
 }
 function collectRows(spec,key,input) {
   if (!spec) return []
-  const rows = Array.from({length:repeatCount(spec,key,input)},(_,index) => Object.fromEntries(spec.rows.map(item => {
+  const rows = Array.from({length:repeatCount(spec,key,input)},(_,index) => Object.fromEntries(operationRowFields(spec,key+index+'-',input).map(item => {
     return [item.key,input[key+index+'-'+item.key] ?? item.default ?? '']
   })))
   return spec.minRows === 0 ? rows.filter(row => row.space || row.origin) : rows
@@ -985,7 +989,9 @@ function battleCalculations(battles = []) {
       <p>Removed · ${clean(losses.join(', ') || 'None')}</p></div>`
   }
   return `<details class="details battle-calculations"><summary>Battle calculations</summary>
-    ${battles.map(({name,field,assaults}) => `<h3>${clean(name)}</h3>${[...field,...assaults].map(step => `<div class="callout small">
+    ${battles.map(({name,field,assaults,tactics}) => `<h3>${clean(name)}</h3>
+      ${tactics?.length ? `<div class="callout small"><strong>Non-player tactics</strong><ul class="guide-list">${tactics.map(line => `<li>${clean(line)}</li>`).join('')}</ul></div>` : ''}
+      ${[...field,...assaults].map(step => `<div class="callout small">
       <strong>${clean(step.phase)} · ${clean(step.stronghold ?? 'Field Battle')}</strong>
       ${step.skipped ? '<p>Coup de Main skips Escalade.</p>' : `<div class="assault-volleys">
         ${volley('Losses to attackers',step.attackers)}${step.defenders ? volley('Losses to defenders',step.defenders) : ''}</div>`}
@@ -996,6 +1002,12 @@ function resumeBattle() {
   ensure(record,'Start a Battle to make tactical choices.')
   const {job,answers} = record
   const result = replayAction(state(),job,answers)
+  const counts = result.prompt?.counts
+  if (record.countDraft && (!counts || record.countDraft.index !== result.prompt.index || record.countDraft.values.length !== counts.length ||
+      record.countDraft.values.some((value,index) => !inRange(value,0,counts[index].max)))) {
+    delete record.countDraft
+    save()
+  }
   if (!result.prompt) {
     if (job.kind === 'staged') {
       session.work.draft = result.after
@@ -1018,9 +1030,9 @@ function resumeBattle() {
     return
   }
   const {prompt} = result
-  const choiceFields = prompt.counts ? `<div class="fields">${prompt.counts.map(({label,max}) => {
+  const choiceFields = counts ? `<div class="fields">${counts.map(({label,max},index) => {
     const choices = Array.from({length:max+1},(_,n) => [n,n === max ? `All (${max})` : String(n)])
-    return field(clean(label),`<select name="omens-count">${selectOptions(choices,0)}</select>`)
+    return field(clean(label),`<select name="omens-count">${selectOptions(choices,record.countDraft?.values[index] ?? 0)}</select>`)
   }).join('')}</div>` : field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)
   const continueLabel = prompt.counts ? 'Confirm Omens selection' :
     prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'
@@ -1034,7 +1046,14 @@ function resumeBattle() {
     ${prompt.context ? ruleNotes([commandNotes.Battle]) : ''}
     ${diceList(result.dice,true)}`,
     (answers.length ? button('Previous choice','battle-back','ghost') : '')+button('Close Battle','close','ghost'),
-    'battle')
+    'battle',{countIndex:counts ? prompt.index : null})
+}
+function previousTacticalChoice() {
+  const record = session.work.input.battle
+  record.answers.pop()
+  delete record.countDraft
+  save()
+  resumeBattle()
 }
 function eventBattleDialog() {
   const game = state()
@@ -1127,6 +1146,12 @@ function epochDialog() {
   const work = refreshWork('epoch',{hoard:'0'})
   const input = work.input
   const descriptor = epochChoices(game,phase,input)
+  if (phase === 'Civitates Upkeep') {
+    const active = new Set(descriptor.fields.map(item => item.name))
+    for (const key of Object.keys(input)) {
+      if (key.startsWith('cube-quarters-') && !active.has(key)) delete input[key]
+    }
+  }
   let form = ''
   if (phase === 'Annona') {
     form = game.markers[10]?.side === 'unshaded' ? '<p>The active Annona Event skips this phase.</p>' :
@@ -1168,7 +1193,7 @@ function epochPreview() {
     const hoard = isHumanFaction(after,'c') ? Number(input.hoard || 0) : maxHoard(after)
     const note = guided ? input.note?.trim() : epochChoices(after,phase,input) ? runEpochEconomy(after,phase,input,roll,upkeep) : ''
     const replacement = after.deckMode === 'digital' ? upcomingDigitalCard(after) : numOrNull(input.next)
-    const info = {...annona,hoard,note,dice}
+    const info = {...annona,hoard,note,dice,upkeep}
     info.beforeRecovery = () => {
       const stilicho = stilichoRecoveryChoices(after)
       if (stilicho) info.recoveryNote = applyStilichoRecovery(after,isHumanFaction(after,stilicho.faction) ? input : {})
@@ -1195,9 +1220,7 @@ function previewBack(which) {
     const work = session.work
     const job = work?.input.battle?.job
     if (work?.input.battle?.answers.length) {
-      work.input.battle.answers.pop()
-      save()
-      resumeBattle()
+      previousTacticalChoice()
     } else if (job?.kind === 'sample') {
       session.work = null
       save()
@@ -1349,7 +1372,7 @@ function handleAction(action,value) {
       return
     }
     case 'event-battle': eventBattleDialog(); return
-    case 'battle-back': session.work.input.battle.answers.pop(); save(); resumeBattle(); return
+    case 'battle-back': previousTacticalChoice(); return
     case 'battle-demo': openBattleDemo(); return
     case 'resume-battle': prepareAction(resumeBattle); return
     case 'card-detail': cardDetails(Number(value)); return
@@ -1496,6 +1519,8 @@ document.addEventListener('change',async event => {
     if (target.form?.id === 'action-form' && (target.dataset.refresh || ['option','command','feat','side','grant','grantFeat','method','tradeAll'].includes(target.name) || (session.work.input.option === 'event' && target.tagName === 'SELECT' && !target.name.startsWith('eligible') && !/^(rows|feats)\d+-/.test(target.name)))) {
       if (['option','command','feat','side','grant','grantFeat'].includes(target.name)) {
         for (const key of Object.keys(session.work.input)) if (key.startsWith('rows') || key.startsWith('feats')) delete session.work.input[key]
+        delete session.work.input.featTiming
+        delete session.work.input.recycle
         if (target.name === 'side') {
           delete session.work.input.grant
           delete session.work.input.grantFeat
@@ -1517,6 +1542,15 @@ document.addEventListener('input',event => {
   if (!form || !target.name) return
   try {
     if (form.id === 'journal-filters') { updateJournal(form); return }
+    if (form.id === 'battle-form' && target.name === 'omens-count') {
+      const record = session.work.input.battle
+      const index = dialogData?.countIndex
+      if (index === record.answers.length) {
+        record.countDraft = {index,values:new FormData(form).getAll('omens-count').map(Number)}
+        save()
+      }
+      return
+    }
     const descriptor = { 'cards-form':'cards', 'action-form':'action', 'epoch-form':'epoch', 'event-battle-form':'action' }[form.id]
     if (descriptor) changeWork(descriptor,target.name,target.type === 'checkbox' && !target.checked ? '' : target.value)
     if (['annona-blue-spend','annona-wealth-spend'].includes(target.name)) updateAnnonaSummary(form)
@@ -1547,11 +1581,17 @@ document.addEventListener('submit',event => {
       message('New campaign ready.')
     }
     if (form.id === 'battle-form') {
-      const answers = session.work.input.battle.answers
+      const record = session.work.input.battle
+      const {answers,countDraft} = record
       const input = new FormData(form)
+      delete record.countDraft
       answers.push(input.has('omens-count') ? input.getAll('omens-count').join(',') : input.get('answer'))
       try { resumeBattle(); save() }
-      catch (error) { answers.pop(); throw error }
+      catch (error) {
+        answers.pop()
+        if (countDraft) record.countDraft = countDraft
+        throw error
+      }
     }
     if (form.id === 'event-battle-form') {
       const input = Object.fromEntries(new FormData(form))
