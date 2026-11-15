@@ -303,8 +303,8 @@ function victoryTable(game) {
   const {x,s,c,d} = values
   const fragmented = game.imperium === 'f'
   const goals = {
-    d:`${fragmented ? 'Control' : 'Prosperity'} + Prestige ${d.score} / ${d.target+1}${!fragmented && game.imperium[1] !== 'm' ? ' · Military Dominance' : ''}`,
-    c:`Controlled Population ${c.score} / ${c.target+1}${!fragmented && game.imperium[1] !== 'c' ? ' · Civilian Dominance' : ''}`,
+    d:`${fragmented ? 'Control' : 'Prosperity'} + Prestige ${d.score} / ${d.victoryTarget+1}${!fragmented && game.imperium[1] !== 'm' ? ' · Military Dominance' : ''}`,
+    c:`Controlled Population ${c.score} / ${c.victoryTarget+1}${!fragmented && game.imperium[1] !== 'c' ? ' · Civilian Dominance' : ''}`,
     x:`Control ${x.score} / ${x.target+1}${fragmented ? '' : `<br>or Renown ${game.tracks.x} / ${x.renownTarget+1} and Settlements ${x.settlements} / ${x.settlementTarget}`}`,
     s:`Renown ${s.score} / ${s.target+1} and Settlements ${s.victorySettlements} / ${s.settlementTarget}${game.tracks.dalRiada ? ' · includes Dal Riada' : ''}`,
   }

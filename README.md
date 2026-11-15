@@ -1,4 +1,4 @@
-# Pendragon Solo Companion v0.3.8
+# Pendragon Solo Companion v0.3.9
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
@@ -67,6 +67,8 @@ All 768 games across four v0.3.6 sweeps reached scoring. Seed blocks 925000 and 
 Both v0.3.7 sweeps reached scoring in all 384 campaigns. Seed block 925000 used default tactics and 942000 used the last option.
 
 All 220 tests passed for v0.3.8. Seed block 958000 reached scoring in all 192 campaigns using the first tactical choice. The active policy allowed Dux Troops to Reinforce when asked. The Pass policy declined.
+
+In v0.3.9, Reinforce Muster requires an existing Civitates piece in the Battle space, including when granted by St Germanus. Victory outlook shows the qualifying threshold under §7.2 and the final margin under §7.3. All 224 tests passed, and 384 campaigns completed in seed blocks 981000 (default tactical choices) and 983000 (last tactical choice).
 
 ## References
 

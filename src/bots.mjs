@@ -5,7 +5,7 @@ import { battleEnemies, battleForecast, battleTargets, withdrawalCapacity } from
 import { botEventInput, eventBattleRequests, eventChoices, eventSides, runEvent } from './events.mjs'
 import { hasEventEffect, selectBotEventInput } from './event-policy.mjs'
 import { grantRule, setGrantMarkers } from './grants.mjs'
-import { runCommand, runCommandFeat, settleSpaceLimit } from './commands.mjs'
+import { civitatesMusterCapacity, runCommand, runCommandFeat, settleSpaceLimit } from './commands.mjs'
 import { botForcesRaidBattle, raidBonusPlunder, raidResponders } from './operations.mjs'
 import { addProsperity, availability, boardTotals, changeTrack, clone, control, countStrongholds, duxFunds, friendlyControl, goldAvailable, hasStronghold, isFragmentation, loaded, makeRoller as positionRoller, on, piecesByOwner, plunderTo, preemption, removeProsperity, scores, spendCivitates, spendDux, sum, toOwner, totalProsperity } from './position.mjs'
 import { actionOptions, activeFaction, finishAction, isPivotalCard, pivotalOptions, resolveImperium } from './sequence.mjs'
@@ -275,11 +275,6 @@ function friendlyPieceLead(state, name, faction) {
 const civGroups = ['com','cxw','csw','mil']
 const duxGroups = ['cav','dxw','dsw']
 const poolOf = (state,faction,blueConsent = false) => faction === 'c' ? state.tracks.blue + state.tracks.wealth : duxFunds(state,blueConsent)
-function fixedMusterCapacity(state,name) {
-  const space = state.land[name]
-  return space.sites.filter(site => ['town','hill'].includes(site?.piece)).length +
-    (friendlyControl(state,name,'c') ? space.pop : 0)
-}
 function stackingGain(state,name,owner,mutate) {
   if (friendlyControl(state,name,owner)) return 0
   const space = clone(state.land[name])
@@ -298,7 +293,7 @@ function civMusterCandidates(state, chosen, phase) {
       return gain > 0 ? [{name,slot,rank:[gain]}] : []
     }
     if (phase === 'troops') {
-      const capacity = fixedMusterCapacity(state,name)
+      const capacity = civitatesMusterCapacity(state,name)
       // Reserve Wealth needed to cover the 2-Resource entry cost.
       const comitates = Math.min(avail.com,Math.max(0,state.tracks.wealth-Math.max(0,2-state.tracks.blue)),capacity)
       const militia = state.tracks.blue >= 2 ? Math.min(avail.mil,(capacity-comitates)*recruitMilitia(state)) : 0
@@ -790,7 +785,7 @@ function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enem
     } else {
       for (const {request,outcome} of queue) {
         if (state.tracks.blue < 2) break
-        const count = Math.min(availability(state).mil,fixedMusterCapacity(state,request.name)*recruitMilitia(state))
+        const count = Math.min(availability(state).mil,civitatesMusterCapacity(state,request.name)*recruitMilitia(state))
         if (count <= 0) continue
         const testing = clone(state)
         testing.land[request.name].units.mil[0] += count
@@ -1427,9 +1422,7 @@ const enemyTroops = (state,name,faction) => {
 }
 const shieldsOf = state => {
   const values = scores(state)
-  const dTarget = isFragmentation(state) ? 17 : state.imperium[0] === 'r' ? 75 : 60
-  const cTarget = isFragmentation(state) ? 16 : state.imperium[0] === 'r' ? 36 : 27
-  return {d:values.d.score-dTarget,c:values.c.score-cTarget}
+  return {d:values.d.score-values.d.victoryTarget,c:values.c.score-values.c.victoryTarget}
 }
 function raidPriority(state,name,faction,big,mode) {
   const region = BY_NAME[name]
@@ -1946,7 +1939,7 @@ function mistbornBriton(state,owner,roll) {
     const land = state.land[name]
     const row = owner === 'd'
       ? {space:name,cavalry:Math.min(stock.cav,cavalryTrainCapacity(state,name)),militia:eligibleTownSites(state,name) ? Math.min(stock.mil,2*recruitMilitia(state)) : 0}
-      : {space:name,mode:'troops',militia:Math.min(stock.mil,fixedMusterCapacity(state,name)*recruitMilitia(state)),comitates:0}
+      : {space:name,mode:'troops',militia:Math.min(stock.mil,civitatesMusterCapacity(state,name)*recruitMilitia(state)),comitates:0}
     if (!(row.cavalry || row.militia)) continue
     if (owner === 'd' && !fortsIn(state,[name]) && !duxFriendly(state,name) || owner === 'c' && !native(state,name,'c')) continue
     const base = clone(state)
@@ -1969,7 +1962,7 @@ function germanus(state,roll) {
     const foes = battleEnemies(state,name,'c').filter(enemy=>barbarians.includes(enemy))
     if (!foes.length) continue
     const rows = []
-    const muster = Math.min(availability(state).mil,fixedMusterCapacity(state,name)*recruitMilitia(state))
+    const muster = Math.min(availability(state).mil,civitatesMusterCapacity(state,name)*recruitMilitia(state))
     if (muster > 0) rows.push({space:name,mode:'muster',militia:muster})
     for (const origin of BY_NAME[name].adj.filter(origin=>friendlyControl(state,origin,'c'))) {
       const space = state.land[origin]

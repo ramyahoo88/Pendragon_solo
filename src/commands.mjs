@@ -21,6 +21,13 @@ export const settleSpaceLimit = (state,faction) =>
   styleMarker(state,45,'shaded') && (state.markers[45].faction ?? 'x') === faction ? 2 : 1
 const militiaMultiplier = state => state.markers[4] ? 2 : 1
 
+export function civitatesMusterCapacity(state,name) {
+  const space = state.land[name]
+  if (!groupForces(space,'c')) return 0
+  return siteCount(space,'town') + siteCount(space,'hill') +
+    (friendlyControl(state,name,'c') ? space.pop : 0)
+}
+
 function canShareBlue(state) {
   return state.imperium === 'ac' && !isHumanFaction(state,'c') && scores(state).d.margin < scores(state).c.margin
 }
@@ -210,7 +217,7 @@ export function commandFeatFields(state,faction,command,feat,options={}) {
         {...qty('mil',`Militia to Muster (${availability(state).mil} Available now)`,12,0,''),mode:'muster'},
         ...movement.map(field => ({...field,mode:'move'})),
       ],options.reinforceBonus ? 0 : 1,REGIONS.length,
-      `${options.free ? 'Reinforce is free.' : 'Each Reinforce space costs 2 Resources.'} For Muster, leave the count blank to use Available Militia, or enter a count to use recycling. Supply and Control are checked when the Feat resolves. Movement to adjacent Battles is limited to D6−2${options.reinforceBonus ? '+'+options.reinforceBonus : ''} Troops per origin.`)
+      `${options.free ? 'Reinforce is free.' : 'Each Reinforce space costs 2 Resources.'} Muster requires a Civitates piece in the Battle space. Leave the count blank to use Available Militia, or enter a count to use recycling. Supply and Control are checked when the Feat resolves. Movement to adjacent Battles is limited to D6−2${options.reinforceBonus ? '+'+options.reinforceBonus : ''} Troops per origin.`)
     }
     case 'Requisition':
       return rowSet([spaceField()],0,6,'Select up to six spaces with a Dux piece and a Civitates Stronghold. Dux Plunder anywhere converts to Dux Resources even with zero selected spaces.')
@@ -319,7 +326,6 @@ function townReplacement(state,name,row,replaceHill) {
 
 function musterCommand(state,rows,{spend,options,recycle},journal) {
   const modes = new Set(['troops','hill','town','replace','both','bothReplace'])
-  const initialControl = new Map(rows.map(({space}) => [space,friendlyControl(state,space,'c')]))
   const placements = rows.map(row => {
     const name = row.space
     const space = state.land[name]
@@ -329,7 +335,7 @@ function musterCommand(state,rows,{spend,options,recycle},journal) {
     ensure(!options.troopsOnly || mode === 'troops','The Event grants Muster for Troops only.')
     const militia = int(row.militia,'Militia',12)
     const comitates = int(row.comitates,'Comitates',6)
-    const capacity = siteCount(space,'town') + siteCount(space,'hill') + (initialControl.get(name) ? space.pop : 0)
+    const capacity = civitatesMusterCapacity(state,name)
     if (mode === 'troops') ensure(militia + comitates > 0 && Math.ceil(militia/militiaMultiplier(state)) + comitates <= capacity,`Check the Muster capacity of ${capacity} in ${name}.`)
     else ensure(hasMajority(state,space,'c'),`A friendly majority including Raiders is required to build in ${name}.`)
     return {row,mode,militia,comitates,wealth:mode === 'troops' ? comitates : mode === 'hill' ? 0 : 2}
@@ -590,8 +596,8 @@ function reinforceColumns(state,rows,context) {
     ensure(battleSpaces.includes(name) || battlesHereOrNearby.length && friendlyControl(state,name,'c'),`Reinforce requires a Battle space or adjacent Briton Control in ${name}.`)
     if (!row.mode || row.mode === 'muster') {
       ensure(battleSpaces.includes(name),'Reinforce can Muster Militia only in a Battle space.')
-      const base = siteCount(space,'town') + siteCount(space,'hill') + (friendlyControl(state,name,'c') ? space.pop : 0)
-      const capacity = base*militiaMultiplier(state)
+      ensure(groupForces(space,'c') > 0,`Muster in ${name} requires a Civitates piece.`)
+      const capacity = civitatesMusterCapacity(state,name)*militiaMultiplier(state)
       const explicit = row.mil !== '' && row.mil != null
       const count = explicit ? int(row.mil,'Militia',12) : null
       ensure(count == null || count > 0 && count <= capacity,`Check the Reinforce Muster limit of ${capacity} Militia in ${name}.`)

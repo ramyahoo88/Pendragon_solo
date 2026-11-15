@@ -178,11 +178,17 @@ export function scores(state) {
   const roman = isRoman(state)
   const military = state.imperium[1] === 'm'
   const dScore = (fragment ? pop.d : total) + prestige
-  const dTarget = fragment ? 17 : roman ? (military ? 75 : 85) : (military ? 60 : 70)
-  const cTarget = fragment ? 16 : roman ? (military ? 38 : 36) : (military ? 31 : 27)
+  // §7.2 eligibility uses the printed threshold and the required Dominance.
+  // §7.3 final margins have their own offsets when Dominance differs.
+  const dVictoryTarget = fragment ? 17 : roman ? 75 : 60
+  const cVictoryTarget = fragment ? 16 : roman ? 36 : 27
+  const dTarget = !fragment && !military ? dVictoryTarget+10 : dVictoryTarget
+  const cTarget = !fragment && military ? (roman ? 38 : 31) : cVictoryTarget
   return {
-    d: { score: dScore, target: dTarget, margin: dScore - dTarget, eligible: (fragment || military) && dScore > dTarget },
-    c: { score: pop.c, target: cTarget, margin: pop.c - cTarget, eligible: (fragment || !military) && pop.c > cTarget },
+    d: { score:dScore, target:dTarget, victoryTarget:dVictoryTarget, margin:dScore-dTarget,
+      eligible:(fragment || military) && dScore > dVictoryTarget },
+    c: { score:pop.c, target:cTarget, victoryTarget:cVictoryTarget, margin:pop.c-cTarget,
+      eligible:(fragment || !military) && pop.c > cVictoryTarget },
     ...scenarioBarbarianScores(state,pop,saxonSettlements,scottiSettlements),
   }
 }
