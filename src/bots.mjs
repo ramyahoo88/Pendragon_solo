@@ -566,7 +566,7 @@ function saxonBattleGoal(outcome,{count,mayEvade}) {
   return outcome.destroyed.length > 0 ||
     (count > 0 && !mayEvade && outcome.defenderLosses-outcome.destroyed.length >= count)
 }
-function reinforceFormation(space,allies) {
+function reinforceFormation(space,allies,limit) {
   const order = [
     allies ? ['cav'] : [],
     ['com'],
@@ -574,7 +574,7 @@ function reinforceFormation(space,allies) {
     ['mil'],
   ]
   const troops = []
-  let remaining = 4 // The most that D6 minus two can move.
+  let remaining = limit
   for (const groups of order) {
     for (const carrying of [false,true]) {
       for (const key of groups) {
@@ -589,33 +589,41 @@ function reinforceFormation(space,allies) {
   }
   return troops
 }
+function canReinforceWithDux(state,defender,consent) {
+  return !isFragmentation(state) && defender !== 'd' && (!botHasHuman(state,'d') || consent !== false)
+}
+function reinforceMoves(state,destination,battleSpaces,allies,options = {}) {
+  const moves = []
+  for (const name of BY_NAME[destination].adj) {
+    if (battleSpaces.includes(name) || !friendlyControl(state,name,'c')) continue
+    const troops = reinforceFormation(state.land[name],allies,4+(options.reinforceBonus ?? 0))
+    if (!troops.length) continue
+    // Keep the formation ordered even when the roll moves just its first few units.
+    const formation = destination+' '+troops.map(({key,count,cargo}) => `${key}=${count}:${cargo}`).join(' ')
+    const spec = {
+      faction:'c',command:'Battle',feat:'Reinforce',options,battleSpaces,
+      input:{wealthSpend:0,alliedConsent:allies},
+      rows:[{space:name,mode:'move',formation}],
+    }
+    moves.push({name,destination,spec,usesDux:troops.some(({key}) => duxGroups.includes(key))})
+  }
+  return moves
+}
 function adjacentReinforce(state,requests,roll,reinforceConsent) {
   if (state.tracks.blue < 2) return null
   const battleSpaces = requests.map(request => request.name)
   const candidates = []
   for (const request of requests) {
     const destination = request.name
-    const allies = !isFragmentation(state) && request.defender !== 'd' &&
-      (!botHasHuman(state,'d') || reinforceConsent !== false)
-    const origins = BY_NAME[destination].adj.filter(name =>
-      !battleSpaces.includes(name) && friendlyControl(state,name,'c'))
-    if (!origins.length) continue
+    const allies = canReinforceWithDux(state,request.defender,reinforceConsent)
+    const moves = reinforceMoves(state,destination,battleSpaces,allies)
+    if (!moves.length) continue
     const losses = battleForecast(state,request).defenderLosses
-    for (const name of origins) {
-      const troops = reinforceFormation(state.land[name],allies)
-      if (!troops.length) continue
-      // Give the Feat calculator an ordered formation so a low roll moves
-      // unloaded Troops of the same type before those carrying Plunder.
-      const formation = destination+' '+troops.map(({key,count,cargo}) => `${key}=${count}:${cargo}`).join(' ')
-      const spec = {
-        faction:'c',command:'Battle',feat:'Reinforce',battleSpaces,
-        input:{wealthSpend:0,alliedConsent:allies},
-        rows:[{space:name,mode:'move',formation}],
-      }
+    for (const move of moves) {
       const estimate = clone(state)
-      runCommandFeat(estimate,spec,() => 6)
+      runCommandFeat(estimate,move.spec,() => 6)
       if (battleForecast(estimate,request).defenderLosses > losses) {
-        candidates.push({name,destination,spec,usesDux:troops.some(({key}) => duxGroups.includes(key)),rank:[]})
+        candidates.push({...move,rank:[]})
       }
     }
   }
@@ -1920,13 +1928,13 @@ function eventMarchBattle(state,owner,id,roll,options) {
   const requests = attackWhereArrived(march.state,owner,march.arrivals,id,roll)
   return requests.length ? {base:march.state,requests,note:march.desc} : null
 }
-function estimateEventBattle(state,owner,name,enemy,threshold) {
+function estimateEventBattle(state,owner,name,enemy,threshold,before = state) {
   const request = {name,attacker:owner,defender:enemy,source:'Battle'}
   const outcome = battleForecast(state,request)
   const allied = !isFragmentation(state) && isBritonFaction(owner) && !isBritonFaction(enemy) ? ['d','c'] : [owner]
   const cargo = sum(GROUPS.filter(([,owner]) => allied.includes(owner)).map(([key])=>loaded(state.land[name],key)))
   const loot = Math.max(0,outcome.attackerPlunder-cargo)+outcome.defenderPlunderRemoved
-  const gain = !friendlyControl(state,name,owner) && ownsControlId(outcome.controlAfter,owner) ? state.land[name].pop : 0
+  const gain = !friendlyControl(before,name,owner) && ownsControlId(outcome.controlAfter,owner) ? state.land[name].pop : 0
   const profitable = owner === 'd' ? outcome.prestigeChange > 0 : gain || loot > threshold
   return {request, outcome, rank:[gain,loot,outcome.defenderLosses-outcome.attackerLosses],profitable}
 }
@@ -1956,34 +1964,39 @@ function mistbornBriton(state,owner,roll) {
     roll,'Mistborn · '+command+' and Battle')
   return chosen ? {base:chosen.base,requests:[chosen.request],note:chosen.note} : null
 }
-function germanus(state,roll) {
+function germanus(state,roll,options,consent) {
   const plans = []
-  const options = {free:true,allowFeat:true,reinforceBonus:4}
   for (const {name} of REGIONS) {
     const foes = battleEnemies(state,name,'c').filter(enemy=>barbarians.includes(enemy))
     if (!foes.length) continue
-    const rows = []
-    const muster = Math.min(availability(state).mil,civitatesMusterCapacity(state,name)*recruitMilitia(state))
-    if (muster > 0) rows.push({space:name,mode:'muster',militia:muster})
-    for (const origin of BY_NAME[name].adj.filter(origin=>friendlyControl(state,origin,'c'))) {
-      const space = state.land[origin]
-      const groups = Object.fromEntries(civGroups.map(key=>[key,on(space,key)]))
-      if (Object.values(groups).some(Boolean)) rows.push({space:origin,mode:'move',destination:name,...groups})
-    }
-    const spec = {faction:'c',command:'Battle',feat:'Reinforce',options,rows,battleSpaces:[name]}
-    const preview = clone(state)
-    if (rows.length) runCommandFeat(preview,spec,()=>1)
-    if (!civGroups.some(key=>on(preview.land[name],key))) continue
+    const mil = Math.min(availability(state).mil,civitatesMusterCapacity(state,name)*recruitMilitia(state))
+    const battleSpaces = [name]
+    const muster = mil ? {faction:'c',command:'Battle',feat:'Reinforce',options,battleSpaces,
+      rows:[{space:name,mode:'muster',mil}]} : null
+    const ready = clone(state)
+    if (muster) runCommandFeat(ready,muster)
+    const hasCivitatesTroop = civGroups.some(key => on(ready.land[name],key))
     for (const enemy of foes) {
-      const test = estimateEventBattle(preview,'c',name,enemy,0)
-      if (!test.rank.some(value=>value>0)) continue
-      plans.push({name,enemy,spec,rank:test.rank})
+      const local = hasCivitatesTroop ? estimateEventBattle(ready,'c',name,enemy,0,state) : null
+      if (local?.rank.some(value => value > 0)) plans.push({name,muster,request:local.request,rank:[...local.rank,0]})
+      // When the move supplies the first Civitates Troop, the Dux alone cannot
+      // fill the formation's first slots and leave the Battle without an attacker.
+      const allies = hasCivitatesTroop && canReinforceWithDux(ready,enemy,consent)
+      for (const move of reinforceMoves(ready,name,battleSpaces,allies,options)) {
+        const preview = clone(ready)
+        runCommandFeat(preview,move.spec,() => 6)
+        const test = estimateEventBattle(preview,'c',name,enemy,0,state)
+        if (test.outcome.defenderLosses <= (local?.outcome.defenderLosses ?? -1) || !test.rank.some(value => value > 0)) continue
+        plans.push({name,muster,move:move.spec,request:test.request,rank:[...test.rank,1]})
+      }
     }
   }
   const plan = pickBest(plans,roll,'St Germanus · Battle and Reinforce')
   if (!plan) return null
-  const note = plan.spec.rows.length ? runCommandFeat(state,plan.spec,roll) : ''
-  return {base:state,requests:[{name:plan.name,attacker:'c',defender:plan.enemy,source:'Battle'}],note}
+  const notes = []
+  if (plan.muster) notes.push(runCommandFeat(state,plan.muster,roll))
+  if (plan.move) notes.push(runCommandFeat(state,plan.move,roll))
+  return {base:state,requests:[plan.request],note:notes.join('\n')}
 }
 function raidExposure(state,name,faction,defender) {
   const sides = defenderSides(state,faction,defender)
@@ -2026,7 +2039,8 @@ export function planBotGrant(state,id,faction,side,roll,options={}) {
   }
   if (id === 23) {
     if (botHasHuman(state,'c')) return handTo('c')
-    const result = germanus(base,roll)
+    const consent = options.input?.alliedConsent === true || options.input?.alliedConsent === 'yes'
+    const result = germanus(base,roll,rule.options,consent)
     return result ? wrap(result) : null
   }
   if (id === 60 || !light && [9,37,38,52,58].includes(id)) {

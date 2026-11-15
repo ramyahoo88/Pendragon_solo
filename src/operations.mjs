@@ -1,5 +1,5 @@
 import { BY_NAME, NAMES, REGIONS, ROADS, SEAS } from './data.mjs'
-import { availability, changeTrack, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, hasStronghold, humanFactions, inRange, isFragmentation, loaded, moveUnits, on, plunderTo, preemption, toOwner, totalProsperity } from './position.mjs'
+import { availability, changeTrack, checkUnitDonors, clone, control, ensure, friendlyControl, goldAvailable, groupLabel, hasStronghold, humanFactions, inRange, isFragmentation, loaded, moveUnits, on, plunderTo, preemption, reuseUnitDonors, toOwner, totalProsperity, unitSupply } from './position.mjs'
 import { battleEnemies, battleTargets, raidReactionSafe } from './battle.mjs'
 import { commandEconomy, commandFeatFields, duxPaymentFields, recycleField, runCommandFeat } from './commands.mjs'
 
@@ -68,6 +68,41 @@ function raidPrice(state,faction,dice,options) {
   if (faction === 's' && state.markers[63]?.side === 'unshaded') price++
   return price
 }
+
+function raidLanding(state,faction,name,requested,reply,notes) {
+  const kind = faction+'r'
+  const supply = unitSupply(state,faction,name,kind,requested)
+  const {available,shortfall,donors} = supply
+  if (!reply || !donors.length) return available
+
+  const target = name === niallBox ? 'Niall’s box' : name
+  const counts = donors.map(({name,count,plunder}) => ({
+    label:`${name} · ${count} Raiders${plunder ? ' · '+plunder+' carrying Plunder' : ''}`,
+    max:Math.min(count,shortfall),
+  }))
+  const none = counts.map(() => 0).join(',')
+  let remaining = shortfall
+  const fill = counts.map(({max}) => {
+    const take = Math.min(max,remaining)
+    remaining -= take
+    return take
+  }).join(',')
+  const answer = reply({
+    stage:'Raid supply',name:target,title:'Reuse Raiders for '+target+'?',
+    counts,supply:{requested,available,shortfall},defaultValue:none,progress:[...notes],
+    options:[{value:none,label:'Leave unplaced'},{value:fill,label:'Reuse as many as possible'}],
+  })
+  const quantities = typeof answer === 'string' ? answer.split(',') : []
+  ensure(quantities.length === counts.length && quantities.every(value => /^\d+$/.test(value)),
+    'Choose a Raider count for each donor space.')
+  const removals = new Map(donors.map(({name},index) => [name,Number(quantities[index])]).filter(([,count]) => count))
+  const reused = checkUnitDonors(supply,removals)
+  notes.push(...reuseUnitDonors(state,kind,removals))
+  const missing = shortfall-reused
+  if (missing) notes.push(`${target}: ${missing} of ${requested} rolled Raiders left unplaced.`)
+  return available+reused
+}
+
 export function raidBonusPlunder(state,name,faction,controller,emptyRaiders) {
   const marker = state.markers[70]
   if ((controller !== 'b' && controller !== 'c') || BY_NAME[name].terrain === 'City' ||
@@ -181,7 +216,10 @@ export function militaryFields(state,faction,command,feat,options,input = {}) {
       check('battle','Attempt Battle if Raiders land'),
       pick('enemy','Battle target (if more than one)',Object.entries(NAMES).filter(([key]) => ['d','c','x','s'].includes(key) && key !== faction),false),
     ]
-    return {minRows:1,maxRows:options.limited ? 1 : options.spaceLimit ?? (faction === 'x' ? 3 : 4),rows,controls:[],help:`Choose the targets in resolution order. ${options.diceOverride ? `Each target rolls ${options.diceOverride}D4. ` : ''}The app rolls landings and applies all Raid modifiers.`}
+    const supply = humanHas(state,faction) ?
+      ` ${availability(state)[faction+'r']} Raiders Available. If a roll exceeds supply, you can reuse your own Raiders after the roll.` : ''
+    return {minRows:1,maxRows:options.limited ? 1 : options.spaceLimit ?? (faction === 'x' ? 3 : 4),rows,controls:[],
+      help:`Choose the targets in resolution order. ${options.diceOverride ? `Each target rolls ${options.diceOverride}D4. ` : ''}The app rolls landings and applies all Raid modifiers.${supply}`}
   }
   return null
 }
@@ -298,7 +336,8 @@ export function runMilitary(state,spec,roll,fight,reply) {
     const name = row.space
     const kind = faction+'r'
     const values = Array.from({length:row.dice},() => roll(4,'Raid · '+(name === niallBox ? 'Niall’s box' : name)))
-    const normal = Math.min(availability(state)[kind],Math.max(0,values.reduce((n,value) => n+value,0)-row.route.minus))
+    const requested = Math.max(0,values.reduce((n,value) => n+value,0)-row.route.minus)
+    const normal = raidLanding(state,faction,name,requested,reply,notes)
     if (name === niallBox) {
       ensure(!Number(row.niall || 0),'Raiders cannot return to Niall’s box as reinforcements.')
       changeTrack(state,'niall',normal)

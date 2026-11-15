@@ -119,6 +119,45 @@ export function availability(state) {
   free.sr -= state.tracks.niall
   return free
 }
+
+export function unitSupply(state,faction,destination,group,requested) {
+  const {owner,piece} = GROUP[group]
+  const available = Math.min(requested,availability(state)[piece])
+  const shortfall = requested-available
+  const donors = []
+  if (shortfall && owner === faction && isHumanFaction(state,faction)) {
+    for (const {name} of REGIONS) {
+      const count = on(state.land[name],group)
+      if (name !== destination && count) donors.push({name,count,plunder:loaded(state.land[name],group)})
+    }
+  }
+  return {group,requested,available,shortfall,donors}
+}
+
+export function checkUnitDonors({group,shortfall,donors},removals) {
+  const label = groupLabel(group)
+  let total = 0
+  for (const [name,count] of removals) {
+    const donor = donors.find(item => item.name === name)
+    ensure(donor && inRange(count,1,donor.count),`Choose no more ${label} than ${name} has to reuse.`)
+    total += count
+  }
+  ensure(total <= shortfall,`Reuse at most ${shortfall} ${label} to fill the supply shortfall.`)
+  return total
+}
+
+export function reuseUnitDonors(state,group,removals) {
+  const notes = []
+  for (const [name,count] of removals) {
+    const units = state.land[name].units[group]
+    const cargo = Math.max(0,count-(units[0]-units[1]))
+    units[0] -= count
+    units[1] -= cargo
+    notes.push(`Reused ${count} ${groupLabel(group)} from ${name}.`+
+      (cargo ? ` ${cargo} Plunder there went off board.` : ''))
+  }
+  return notes
+}
 export function goldAvailable(state) {
   const totals = boardTotals(state)
   return 90 - totals.total - totals.plunder

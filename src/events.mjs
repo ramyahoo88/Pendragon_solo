@@ -3,9 +3,9 @@ import { printedPopulation } from './scenarios.mjs'
 import { battleEnemies } from './battle.mjs'
 import { annonaChoices, planAnnona, resolveAnnona, resolveImperium } from './sequence.mjs'
 import {
-  addProsperity, availability, boardTotals, clone, control, ensure,
+  addProsperity, availability, boardTotals, checkUnitDonors, clone, control, ensure,
   friendlyControl, goldAvailable, groupLabel, isFragmentation, isHumanFaction, isRaider, isRoman, loaded, on, piecesByOwner,
-  removeProsperity, scores, setImperium, spendCivitates, sum, toOwner, totalProsperity,
+  removeProsperity, reuseUnitDonors, scores, setImperium, spendCivitates, sum, toOwner, totalProsperity, unitSupply,
 } from './position.mjs'
 
 const regions = REGIONS.filter(space => space.terrain !== 'City')
@@ -85,42 +85,86 @@ const validInputNumber = (input,key,min,max,defaultValue = 0) => {
 }
 
 function eventUnitPlacement(state,faction,destination,group,requested,input) {
-  const { owner,piece } = GROUP[group]
+  const supply = unitSupply(state,faction,destination,group,requested)
+  const {available,shortfall,donors} = supply
   const label = groupLabel(group)
-  const available = Math.min(requested,availability(state)[piece])
-  const shortfall = requested-available
-  const sources = shortfall && owner === faction && isHumanFaction(state,faction)
-    ? REGIONS.filter(({name}) => name !== destination && on(state.land[name],group))
-    : []
-  const donors = sources.map(({name}) => option(name,`${name} · ${on(state.land[name],group)} here`))
-  const slots = Math.min(shortfall,sum(sources.map(({name}) => on(state.land[name],group))))
-  const fields = Array.from({length:slots},(_,index) =>
-    selectField(`event-recycle-${destination}-${group}-${index+1}`,
-      `Reuse ${label}${slots > 1 ? ' '+(index+1) : ''} from`,[option('','Leave unplaced'),...donors]))
+  const choices = donors.map(({name,count,plunder}) =>
+    option(name,`${name} · ${count} here${plunder ? ' · '+plunder+' carrying Plunder' : ''}`))
+  const slots = Math.min(shortfall,sum(donors.map(donor => donor.count)))
+  const fields = Array.from({length:slots},(_,index) => ({
+    ...selectField(`event-recycle-${destination}-${group}-${index+1}`,
+      `Reuse ${label}${slots > 1 ? ' '+(index+1) : ''} from`,[option('','Leave unplaced'),...choices]),
+    refresh:true,
+  }))
+  const selected = new Map()
+  for (const field of fields) {
+    const name = input[field.name]
+    if (choices.some(choice => choice.value === name)) selected.set(name,(selected.get(name) ?? 0)+1)
+  }
+  const fromDonors = sum(donors.map(({name,count}) => Math.min(count,selected.get(name) ?? 0)))
   return {
-    fields,
+    fields,available,fromDonors,
+    summary:supplySummary(label,requested,available,fromDonors),
     check() {
-      const removals = new Map()
-      for (const field of fields) {
-        const origin = defaultChoice(input,field.name,field.options)
-        if (!origin) continue
-        const count = (removals.get(origin) ?? 0)+1
-        ensure(count <= on(state.land[origin],group),`Choose no more ${label} than ${origin} has to reuse.`)
-        removals.set(origin,count)
-      }
-      return removals
+      for (const field of fields) defaultChoice(input,field.name,field.options)
+      checkUnitDonors(supply,selected)
+      return selected
     },
-    place(removals) {
-      for (const [origin,count] of removals) removeUnit(state,origin,group,count)
+    place(removals,board = state) {
+      const notes = reuseUnitDonors(board,group,removals)
       const placed = available+sum([...removals.values()])
-      state.land[destination].units[group][0] += placed
-      const details = [`${placed} of ${requested} ${label} placed in ${destination}.`]
-      for (const [origin,count] of removals) details.push(`Reused ${count} ${label} from ${origin}.`)
+      board.land[destination].units[group][0] += placed
+      const details = [`${placed} of ${requested} ${label} placed in ${destination}.`,...notes]
       if (placed < requested) {
         details.push(`Available ${label} supply exhausted.`)
-        if (group === 'com' && state.pools.notYet) details.push(`${state.pools.notYet} Comitates remain Not Yet in Play.`)
+        if (group === 'com' && board.pools.notYet) details.push(`${board.pools.notYet} Comitates remain Not Yet in Play.`)
       }
-      return details.join(' ')
+      return {placed,notes,detail:details.join(' ')}
+    },
+  }
+}
+
+function supplySummary(label,requested,available,fromDonors) {
+  return `${label} · ${requested} requested · ${available} from Available · ${fromDonors} from donors`
+}
+
+function civitatesEventPlacement(state,faction,name,amount,input) {
+  const stock = availability(state)
+  const comSources = unitSupply(state,faction,name,'com',amount).donors
+  const milSources = unitSupply(state,faction,name,'mil',amount).donors
+  const cap = Math.min(amount,stock.com+sum(comSources.map(donor => donor.count)))
+  const defaultComitates = Math.min(stock.com,Math.max(0,amount-stock.mil))
+  const canReuse = comSources.length || milSources.length
+  const min = canReuse ? 0 : defaultComitates
+  const choice = input.comitates == null || input.comitates === '' ? defaultComitates : Number(input.comitates)
+  const comitates = Number.isInteger(choice) && choice >= min && choice <= cap ? choice : defaultComitates
+  const troops = [
+    eventUnitPlacement(state,faction,name,'com',comitates,input),
+    eventUnitPlacement(state,faction,name,'mil',amount-comitates,input),
+  ]
+  const fromDonors = sum(troops.map(group => group.fromDonors))
+  const fromStock = Math.min(amount-fromDonors,stock.com+stock.mil)
+  const countField = {...amountField('comitates',canReuse ? 'Comitates to place' : 'Use Available Comitates',
+    min,cap,defaultComitates),refresh:true}
+  return {
+    fields:[...(cap ? [countField] : []),...troops.flatMap(group => group.fields)],
+    summary:amount ? supplySummary('Civitates Troops',amount,fromStock,fromDonors) : '',
+    check() {
+      validInputNumber(input,'comitates',min,cap,defaultComitates)
+      return troops.map(group => group.check())
+    },
+    place(board,removals) {
+      const results = troops.map((group,index) => group.place(removals[index],board))
+      let placed = sum(results.map(result => result.placed))
+      // Use any unallocated stock of the other type before leaving a gap.
+      for (const group of ['mil','com']) {
+        const extra = Math.min(amount-placed,availability(board)[group])
+        board.land[name].units[group][0] += extra
+        placed += extra
+      }
+      const notes = results.flatMap(result => result.notes)
+      if (placed < amount) notes.push(`Placed ${placed} of ${amount} requested. Available Civitates Troop supply exhausted.`)
+      return {placed,notes}
     },
   }
 }
@@ -548,7 +592,7 @@ function resolveBaseEvent(state,id,faction,side,input) {
     }
     case 12: return eventRomanitas(state,input,side)
     case 13: {
-      if (unshaded) return eventCunedda(state,input)
+      if (unshaded) return eventCunedda(state,faction,input)
       const employers = listed(['d','c'],id=>NAMES[id])
       return perform('Add Scotti Foederati in Ordovices.',()=>{
         const employer = defaultChoice(input,'employer',employers)
@@ -704,9 +748,10 @@ function resolveBaseEvent(state,id,faction,side,input) {
       const placement = mandatorySpace(state,input,names,'Select a Hills Region on the Hibernicus coast for the new forces.',name => {
         const donors = units.map(placement => placement.check())
         const hold = placeEventHold(state,name,piece,input,'site')
-        return [eventHoldResult(hold,piece,name),...units.map((placement,index) => placement.place(donors[index]))].join(' ')
+        return [eventHoldResult(hold,piece,name),...units.map((placement,index) => placement.place(donors[index]).detail)].join(' ')
       })
       if (names.includes(name)) placement.fields.push(...holdField(state,name,'site',piece),...units.flatMap(placement => placement.fields))
+      placement.summary = units.map(placement => placement.summary).join('\n')
       return placement
     }
     case 35: return populationEvents(state,id,side,input)
@@ -736,7 +781,7 @@ function resolveBaseEvent(state,id,faction,side,input) {
     }
     case 47:
     case 65: return eventAcculturation(state,input,side)
-    case 49: return eventVortigern(state,input)
+    case 49: return eventVortigern(state,faction,input)
     case 50:
     case 72: {
       if (unshaded) return eventProsperity(state,input,side,2,2,{needsTown:true})
@@ -835,9 +880,10 @@ function resolveBaseEvent(state,id,faction,side,input) {
         const donors = units.check()
         const placed = availability(state).ss > 0
         if (placed) state.land[name].sites[index] = {piece:'ss',employer:null}
-        return eventHoldResult(placed,'ss',name)+' '+units.place(donors)
+        return eventHoldResult(placed,'ss',name)+' '+units.place(donors).detail
       })
       if (choices.length) procedure.fields.push(selectField('site','Vacant Site',choices,choices[0].value),...units.fields)
+      procedure.summary = units?.summary
       return procedure
     }
     case 74: return revoltAdventus(state,input)
@@ -1019,44 +1065,55 @@ export function applyStilichoRecovery(state,input={}) {
   return `${plan.count} Stilicho Cavalry returned to Available.`
 }
 
-function eventCunedda(state,input) {
+function eventCunedda(state,faction,input) {
   const from = 'Votadini'
   const to = 'Ordovices'
   const oldFort = state.land[from].sites.flatMap((site,index)=>site?.piece === 'hill' ? [option(String(index),BY_NAME[from].sites[index].name)] : [])
   const remove = unitAllocation(state,from,civitatesTroops,input,'remove-',Math.min(2,sum(civitatesTroops.map(key=>on(state.land[from],key)))))
   const draft = clone(state)
   for (const [key,amount] of remove.preview) removeUnit(draft,from,key,amount)
+  const placement = civitatesEventPlacement(draft,faction,to,4,input)
   const fields = [
     ...(oldFort.length > 1 ? [selectField('hill','Votadini Hillfort to remove',oldFort,oldFort[0].value)] : []),
     ...remove.fields.map(field=>({...field,refresh:true})),
     ...holdField(state,to,'site','hill'),
-    ...comitatesChoice(draft,4),
+    ...placement.fields,
   ]
-  return perform('Remove one Hillfort and two Civitates Troops where possible in Votadini. Place a Hillfort and up to four Available Troops in Ordovices.',()=>{
+  const event = perform('Remove one Hillfort and two Civitates Troops where possible in Votadini. Place a Hillfort and four Troops where possible in Ordovices.',()=>{
     const troops = remove.check()
     const selected = oldFort.length ? Number(defaultChoice(input,'hill',oldFort)) : null
+    const donors = placement.check()
     if (selected !== null) state.land[from].sites[selected] = null
     for (const [key,amount] of troops) removeUnit(state,from,key,amount)
     const hill = placeEventHold(state,to,'hill',input,'site')
-    const placed = replaceWithCivitatesUnits(state,to,4,input)
-    return `${placed} Civitates Troops${hill ? ' and a Hillfort' : ''} placed in Ordovices after losses in Votadini.`
+    const {placed,notes} = placement.place(state,donors)
+    return [`${placed} Civitates Troops${hill ? ' and a Hillfort' : ''} placed in Ordovices after losses in Votadini.`,...notes].join(' ')
   },fields)
+  return {...event,summary:placement.summary}
 }
 
-function eventVortigern(state,input) {
+function eventVortigern(state,faction,input) {
   const name = 'Cantiaci'
   const space = state.land[name]
   const saved = unitAllocation(state,name,britonTroops,input,'keep-',Math.min(2,sum(britonTroops.map(key=>on(space,key)))))
-  return perform('Choose the Briton Troops that survive in Cantiaci. Place native Saxon forces at Rutupiae.',()=>{
-    const retained = Object.fromEntries(saved.check())
-    const removed = sum(britonTroops.map(key=>removeUnit(state,name,key,on(space,key)-(retained[key] ?? 0),key==='cav' ? 'casualties' : null)))
+  const removeBritons = (board,picks) => {
+    const retained = Object.fromEntries(picks)
+    return sum(britonTroops.map(key => removeUnit(board,name,key,
+      on(board.land[name],key)-(retained[key] ?? 0),key === 'cav' ? 'casualties' : null)))
+  }
+  const draft = clone(state)
+  removeBritons(draft,saved.preview)
+  const units = eventUnitPlacement(draft,faction,name,'xw',6,input)
+  const event = perform('Choose the Briton Troops that survive in Cantiaci. Place native Saxon forces at Rutupiae.',()=>{
+    const picks = saved.check()
+    const donors = units.check()
+    const removed = removeBritons(state,picks)
     const index = BY_NAME[name].sites.findIndex(site=>site.name==='Rutupiae')
     const placed = availability(state).xs > 0
     if (placed) space.sites[index] = {piece:'xs',employer:null}
-    const bands = Math.min(6,availability(state).xw)
-    space.units.xw[0] += bands
-    return `${removed} Briton Troops removed. ${bands} Saxon Warbands${placed ? ' and a Settlement' : ''} at Rutupiae.`
-  },saved.fields)
+    return `${removed} Briton Troops removed. ${placed ? 'Settlement placed at Rutupiae. ' : ''}${units.place(donors,state).detail}`
+  },[...saved.fields.map(field => ({...field,refresh:true})),...units.fields])
+  return {...event,summary:units.summary}
 }
 
 function eventEvangelization(state,input) {
@@ -1405,22 +1462,27 @@ function eventDyfed(state,faction,input,side) {
   const space = state.land[name]
   if(side==='shaded') {
     const units = eventUnitPlacement(state,faction,name,'sw',4,input)
-    return perform('Place Scotti forces in Demetae.',()=>{
+    const event = perform('Place Scotti forces in Demetae.',()=>{
       const donors = units.check()
       const placed = placeEventHold(state,name,'ss',input,'site')
-      return eventHoldResult(placed,'ss',name)+' '+units.place(donors)
+      return eventHoldResult(placed,'ss',name)+' '+units.place(donors).detail
     },[...holdField(state,name,'site','ss'),...units.fields])
+    return {...event,summary:units.summary}
   }
   const settlements = space.sites.flatMap((site,index)=>site?.piece==='ss' && !site.employer ? [option(String(index),BY_NAME[name].sites[index].name)]:[])
   const amount = on(space,'sw')
-  const fields = [...comitatesChoice(state,amount)]
+  const placement = civitatesEventPlacement(state,faction,name,amount,input)
+  const fields = [...placement.fields]
   if(settlements.length>1) fields.push(selectField('site','Settlement to replace',settlements,settlements[0].value))
-  return perform('Exchange native Scotti pieces in Demetae for Civitates pieces.',()=>{
-    const troops = replaceWithCivitatesUnits(state,name,amount,input)
+  const event = perform('Exchange native Scotti pieces in Demetae for Civitates pieces.',()=>{
+    const donors = placement.check()
+    const site = settlements.length ? Number(defaultChoice(input,'site',settlements)) : null
+    const {placed,notes} = placement.place(state,donors)
     removeUnit(state,name,'sw',amount)
-    if(settlements.length) replaceAtSite(state,name,Number(defaultChoice(input,'site',settlements)),'hill')
-    return `${amount} Scotti Warbands removed, ${troops} Civitates troops placed.`
+    if(site !== null) replaceAtSite(state,name,site,'hill')
+    return [`${amount} Scotti Warbands removed, ${placed} Civitates troops placed.`,...notes].join(' ')
   },fields)
+  return {...event,summary:placement.summary}
 }
 function eventAcculturation(state,input,side) {
   if(side==='unshaded') {

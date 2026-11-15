@@ -62,7 +62,7 @@ export function parseSave(text) {
       } else if (battle.countDraft !== undefined) {
         const draft = battle.countDraft
         ensure(draft?.index === answers.length && Array.isArray(draft.values) && draft.values.length > 0 &&
-          draft.values.length <= 24 && draft.values.every(value => inRange(value,0,30)), 'Invalid unconfirmed Omens counts.')
+          draft.values.length <= 24 && draft.values.every(value => inRange(value,0,30)), 'Invalid unconfirmed piece counts.')
       }
     }
     if (editor !== undefined) ensure(work.draft && (editor === 'tracks' || Object.hasOwn(BY_NAME,editor)), 'Invalid pending board editor.')

@@ -8,9 +8,13 @@ import { availability, changeTrack, clone, ensure, isHumanFaction, loaded, on, p
 import { finishAction, log } from './sequence.mjs'
 import { makeRoller, planBotGrant, planRaid } from './bots.mjs'
 
+const stepText = step => typeof step === 'string' ? step : step.heading+' · '+step.lines.join(' ')
+
 export function replayAction(state,job,answers=[]) {
   const after = clone(job.origin ?? state)
-  const data = job.descriptionText ? [job.descriptionText] : []
+  const germanus = job.option === 'event' && (job.id ?? state.current) === 23
+  const eventStep = text => germanus ? {heading:'Reinforce',lines:text.split('\n')} : text
+  const data = job.descriptionText ? [eventStep(job.descriptionText)] : []
   const battles = []
   const dice = [...(job.dice || [])]
   const roll = makeRoller(after,dice)
@@ -20,7 +24,7 @@ export function replayAction(state,job,answers=[]) {
   let afterRaid = job.afterRaid
   const reply = question => {
     if (index === answers.length) throw new BattleChoice({
-      ...question,index,name:question.name ?? lastSpace,progress:[...data,...(question.progress || [])],
+      ...question,index,name:question.name ?? lastSpace,progress:[...data.map(stepText),...(question.progress || [])],
     })
     const answer = answers[index++]
     if (!question.counts) ensure(question.options.some(option => option.value === answer),'A saved tactical choice is unavailable.')
@@ -64,7 +68,7 @@ export function replayAction(state,job,answers=[]) {
     }
     if (config.reactionFaction) data.push(NAMES[config.reactionFaction]+' forces Battle in '+config.name+'.')
     const report = runBattle(after,config,roll,reply)
-    if (report.details.length) data.push(report.name+' · '+report.details.join(' '))
+    if (report.details.length) data.push({heading:'Battle in '+report.name,lines:report.details})
     if (report.field.length || report.assaults.length || report.tactics.length) {
       battles.push({name:report.name,field:report.field,assaults:report.assaults,
         ...(report.tactics.length ? {tactics:report.tactics} : {})})
@@ -109,7 +113,7 @@ export function replayAction(state,job,answers=[]) {
         if (plan?.base) {
           const rng = after.rng
           Object.assign(after,plan.base,{rng})
-          if (plan.description) data.push(plan.description)
+          if (plan.description) data.push(eventStep(plan.description))
           for (const config of plan.requests) fight(config)
           afterRaid = plan.afterRaid ?? afterRaid
         } else {
@@ -139,10 +143,11 @@ export function replayAction(state,job,answers=[]) {
     }
     if (afterRaid?.type === 'conspiratio-barbarica' || job.id === 73 && job.operation?.grant) saxonFollowUp()
     ensure(index === answers.length,'Tactical choices no longer match the saved campaign.')
-    const detail = data.filter(Boolean).join(' ')
+    const steps = data.filter(Boolean)
+    const detail = steps.map(stepText).join(' ')
     if (job.kind === 'action') finishAction(after,job.option,job.description,detail.slice(0,2940),dice,overrides,battles)
     if (job.kind === 'sample') log(after,'Sample Battle',detail.slice(0,2940),dice,battles)
-    return {after,dice,detail,battles}
+    return {after,dice,detail,battles,steps}
   } catch (error) {
     if (error instanceof BattleChoice) return {prompt:error.prompt,dice}
     throw error

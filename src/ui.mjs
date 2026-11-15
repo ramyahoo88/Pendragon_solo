@@ -557,8 +557,14 @@ function showPreview(plan,back) {
   const endsGame = plan.after.result && !state().result
   const victory = endsGame ? `<section class="callout warm"><h3>${clean(victoryTitle(plan.after))}</h3>${victoryDetails(plan.after)}</section>`
     : plan.label === 'Victory' ? `<p class="muted">The campaign continues to ${clean(plan.after.epochPhase)}.</p>${victoryTable(plan.after)}` : ''
-  modal(clean(plan.label),`${victory || `<p class="muted">${clean(plan.description)}</p>`}${botDecisionMarkup(plan.decision,plan.dice)}
-    ${upkeepAllocations(plan.upkeep,true)}${diffList(state(),plan.after,Boolean(victory || plan.upkeep))}
+  const sections = plan.steps?.some(step => typeof step !== 'string')
+  const summary = sections ? plan.steps.map(step => typeof step === 'string' ? `<p class="muted">${clean(step)}</p>` :
+    `<section class="callout small"><h3>${clean(step.heading)}</h3>
+      <ul class="guide-list">${step.lines.map(line => `<li>${clean(line)}</li>`).join('')}</ul></section>`).join('') :
+    `<p class="muted">${clean(plan.description)}</p>`
+  const changes = diffList(state(),plan.after,Boolean(victory || plan.upkeep))
+  modal(clean(plan.label),`${victory || summary}${botDecisionMarkup(plan.decision,plan.dice)}
+    ${upkeepAllocations(plan.upkeep,true)}${sections ? `<section class="stack"><h3>Board and tracks</h3>${changes}</section>` : changes}
     ${battleCalculations(plan.battles)}${diceList(plan.dice || [],true)}`,
     button('Back','preview-back','ghost',back)+button('Apply result','commit','primary'),'preview')
   pending = { base:state(), after:plan.after, label:plan.label }
@@ -729,7 +735,7 @@ function dynamicFields(descriptor,input) {
   const ordinary = fields.filter(field => !field.advanced)
   const advanced = fields.filter(field => field.advanced)
   return `<p class="muted">${clean(descriptor.help)}</p>
-    ${descriptor.summary ? '<p>'+clean(descriptor.summary)+'</p>' : ''}
+    ${descriptor.summary ? '<div class="callout small">'+descriptor.summary.split('\n').map(line => '<p>'+clean(line)+'</p>').join('')+'</div>' : ''}
     ${ordinary.length ? '<div class="fields">'+ordinary.map(spec => descriptorField(spec,input)).join('')+'</div>' : ''}
     ${advanced.length ? '<details><summary>Choose spaces and pieces</summary><div class="fields">'+advanced.map(spec => descriptorField(spec,input)).join('')+'</div></details>' : ''}`
 }
@@ -798,11 +804,14 @@ function grantMarkup(grant,input,game) {
     ${fieldSelect('Move this patrol','fromSea',rule.patrol.from.map(sea => [sea,SEAS[sea]]),input.fromSea || rule.patrol.from[0])}
     ${fieldSelect('Patrol this sea','toSea',rule.patrol.to.map(sea => [sea,SEAS[sea]]),input.toSea || rule.patrol.to[0])}
     </div>` : ''
+  const botRecipient = grant.owner && !isHumanFaction(game,grant.owner)
+  const consent = botRecipient && feat === 'Reinforce' && isHumanFaction(game,'d') && game.imperium !== 'f'
+    ? descriptorField({key:'alliedConsent',label:'Let Civitates move Dux Troops to Reinforce',type:'check'},input) : ''
   return `<p class="muted">${clean(rule.help)}</p>${patrol}<div class="fields">
     ${choices.length ? fieldSelect('Granted action','grant',commandChoices,selection) : ''}
     ${feats.length ? fieldSelect('Feat','grantFeat',[['',rule.optionalFeat ? 'No Feat' : 'Choose Feat'],...feats.map(name => [name,name])],feat) : ''}
-    </div>${grant.owner && !isHumanFaction(game,grant.owner)
-    ? '<p class="muted">'+clean(NAMES[grant.owner])+' will choose and resolve its '+clean(command)+'.</p>'
+    </div>${botRecipient
+    ? '<p class="muted">'+clean(NAMES[grant.owner])+' will choose and resolve its '+clean(command)+'.</p>'+consent
     : operationMarkup(spec,input,command,feat)}`
 }
 function actionSelections(game,faction,input) {
@@ -998,6 +1007,13 @@ function battleCalculations(battles = []) {
         ${volley('Losses to attackers',step.attackers)}${step.defenders ? volley('Losses to defenders',step.defenders) : ''}</div>`}
       </div>`).join('')}`).join('')}</details>`
 }
+const reusedRaiderCount = values => values.reduce((total,count) => total+count,0)
+function raidSupplySummary({requested,available,shortfall},values) {
+  const reused = reusedRaiderCount(values)
+  const status = reused <= shortfall ? `${shortfall-reused} left unplaced.` : `Choose at most ${shortfall} Raiders from donors.`
+  return `<p>${requested} requested · ${available} from Available · ${reused} from donors</p>
+    <p class="${reused > shortfall ? 'error' : 'muted'}">${status}</p>`
+}
 function resumeBattle() {
   const record = session.work?.input.battle
   ensure(record,'Start a Battle to make tactical choices.')
@@ -1026,28 +1042,34 @@ function resumeBattle() {
       modal(clean(job.label),`<p class="muted">${clean(result.detail)}</p>${diffList(job.origin,result.after)}${battleCalculations(result.battles)}${diceList(result.dice,true)}`,
         button('Close sample','discard','primary'),'sample-result')
     } else {
-      showPreview({label:job.label,description:result.detail || job.description,after:result.after,dice:result.dice,battles:result.battles,decision:job.decision},'battle')
+      showPreview({label:job.label,description:result.detail || job.description,after:result.after,dice:result.dice,
+        battles:result.battles,steps:result.steps,decision:job.decision},'battle')
     }
     return
   }
   const {prompt} = result
+  const supply = prompt.supply
+  const values = record.countDraft?.values ?? counts?.map(() => 0)
+  const raidChoice = prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica'
   const choiceFields = counts ? `<div class="fields">${counts.map(({label,max},index) => {
-    const choices = Array.from({length:max+1},(_,n) => [n,n === max ? `All (${max})` : String(n)])
-    return field(clean(label),`<select name="omens-count">${selectOptions(choices,record.countDraft?.values[index] ?? 0)}</select>`)
+    const choices = Array.from({length:max+1},(_,n) => [n,!supply && n === max ? `All (${max})` : String(n)])
+    return field(clean(label),`<select name="piece-count">${selectOptions(choices,values[index])}</select>`)
   }).join('')}</div>` : field('Tactical choice',`<select name="answer">${selectOptions(prompt.options.map(option => [option.value,option.label]),prompt.defaultValue)}</select>`)
-  const continueLabel = prompt.counts ? 'Confirm Omens selection' :
-    prompt.stage.includes('Raid') || prompt.stage === 'Conspiratio Barbarica' ? 'Continue action' : 'Continue Battle'
+  const continueLabel = supply ? 'Confirm Raider placement' : counts ? 'Confirm Omens selection' : raidChoice ? 'Continue action' : 'Continue Battle'
   modal(clean(prompt.stage),`<p class="muted">${clean(prompt.name)}</p><h3>${clean(prompt.title)}</h3>
     ${battlePosition(prompt.context)}
     <form id="battle-form" class="stack">
+      ${supply ? `<div class="callout small" data-raid-supply aria-live="polite">${raidSupplySummary(supply,values)}</div>
+        <p class="small muted">Leave counts at zero to use only Available Raiders. Reuse takes unloaded Raiders first. Plunder on any reused Raiders goes off board.</p>
+        ${diceList(result.dice)}` : ''}
       ${choiceFields}
-      <button class="btn primary" type="submit">${continueLabel} ${icon('arrow')}</button>
+      <button class="btn primary" type="submit" ${supply && reusedRaiderCount(values) > supply.shortfall ? 'disabled' : ''}>${continueLabel} ${icon('arrow')}</button>
     </form>
-    ${prompt.progress.length ? ruleNotes(prompt.progress,'Battle so far') : ''}
+    ${prompt.progress.length ? ruleNotes(prompt.progress,raidChoice ? 'Action so far' : 'Battle so far') : ''}
     ${prompt.context ? ruleNotes([commandNotes.Battle]) : ''}
-    ${diceList(result.dice,true)}`,
-    (answers.length ? button('Previous choice','battle-back','ghost') : '')+button('Close Battle','close','ghost'),
-    'battle',{countIndex:counts ? prompt.index : null})
+    ${supply ? '' : diceList(result.dice,true)}`,
+    (answers.length ? button('Previous choice','battle-back','ghost') : '')+button(raidChoice ? 'Close action' : 'Close Battle','close','ghost'),
+    'battle',{countIndex:counts ? prompt.index : null,supply})
 }
 function previousTacticalChoice() {
   const record = session.work.input.battle
@@ -1544,11 +1566,16 @@ document.addEventListener('input',event => {
   if (!form || !target.name) return
   try {
     if (form.id === 'journal-filters') { updateJournal(form); return }
-    if (form.id === 'battle-form' && target.name === 'omens-count') {
+    if (form.id === 'battle-form' && target.name === 'piece-count') {
       const record = session.work.input.battle
       const index = dialogData?.countIndex
       if (index === record.answers.length) {
-        record.countDraft = {index,values:new FormData(form).getAll('omens-count').map(Number)}
+        const values = new FormData(form).getAll('piece-count').map(Number)
+        record.countDraft = {index,values}
+        if (dialogData.supply) {
+          form.querySelector('[data-raid-supply]').innerHTML = raidSupplySummary(dialogData.supply,values)
+          form.querySelector('button[type="submit"]').disabled = reusedRaiderCount(values) > dialogData.supply.shortfall
+        }
         save()
       }
       return
@@ -1587,7 +1614,7 @@ document.addEventListener('submit',event => {
       const {answers,countDraft} = record
       const input = new FormData(form)
       delete record.countDraft
-      answers.push(input.has('omens-count') ? input.getAll('omens-count').join(',') : input.get('answer'))
+      answers.push(input.has('piece-count') ? input.getAll('piece-count').join(',') : input.get('answer'))
       try { resumeBattle(); save() }
       catch (error) {
         answers.pop()

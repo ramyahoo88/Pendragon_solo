@@ -1,4 +1,4 @@
-# Pendragon Solo Companion v0.3.10
+# Pendragon Solo Companion v0.3.11
 
 Play a tabletop campaign of *Pendragon: The Fall of Roman Britain* from setup through final scoring. The companion tracks Britain, resolves Commands and Battles, and runs the four Non-player factions. Keep the physical deck and enter the two revealed card numbers, or let the digital deck handle card order and reveals.
 
@@ -32,7 +32,9 @@ cmp dist/index.html /tmp/pendragon-rebuild.html
 - Open **Victory outlook** to see current margins and requirements. At the Victory phase the preview shows whether play continues or who wins before you apply it. Non-player previews show the applicable decision rule next to their recorded rolls.
 - Open **Battle calculations** in a preview or its Journal entry to see the reasons for bot tactics and the strikes and losses in Field Battle, Escalade, and Storm. Omens lets you choose how many units to halve from each group in one confirmation. Draft counts survive reload until you confirm or go back.
 - Use the timing selector in **Battle + Reinforce**, **Battle + Pillage**, or **Battle + Entreat** to resolve the Feat before, between, or after Battles. Reinforce shows supply and recycling when you Muster, or the movement controls when you move Troops. The calculator checks the board at the chosen time.
-- When **Tintagel**, shaded **Dyfed**, or shaded **Barbarians** runs out of troops for your faction, choose donor spaces to reuse your own units or leave those placements empty. The preview lists the pieces placed and explains any shortfall. Shaded **Rival Caesars** shows the number of Dux pieces and rounded-up losses in each Region.
+- **Tintagel**, both sides of **Dyfed**, unshaded **Cunedda**, shaded **Vortigern**, and shaded **Barbarians** show the requested troops, Available supply and chosen donors. If supply runs short for a type, choose spaces to reuse your own units or leave that part of the placement empty. Shaded **Rival Caesars** shows the number of Dux pieces and rounded-up losses in each Region.
+- When a human **Raid** rolls more landings than there are Available Raiders, choose how many own Raiders to reuse from other spaces. Counts of zero use only Available Raiders. The roll and unconfirmed donor counts survive reload.
+- **St Germanus** shows Reinforce, Battle, and board changes separately in the preview. The Non-player Civitates first checks local Muster, then rolls for at most one adjacent origin and moves unloaded units first within each type. A human Dux can consent to moves of Dux Troops before previewing the granted action.
 - Upkeep previews and Journal entries show redeployments, Control before and after, and the allocation rule. Split Militia and Comitates among equally near Towns and Hillforts. The Non-player Civitates allocates those cubes for controlled Population, then assigns blue Foederati to matching Settlements. Annona also shows the Civitates share in Resources and Wealth after the Dux allocation.
 - Filter the **Journal** by card, Epoch, acting faction, or a space mentioned in the entry. Search the entries by text, including recorded die rolls. If a bot preview stops, the error dialog lets you retry or export a diagnostic save for that position.
 
@@ -72,6 +74,8 @@ All 220 tests passed for v0.3.8. Seed block 958000 reached scoring in all 192 ca
 In v0.3.9, Reinforce Muster requires an existing Civitates piece in the Battle space, including when granted by St Germanus. Victory outlook shows the qualifying threshold under §7.2 and the final margin under §7.3. All 224 tests passed, and 384 campaigns completed in seed blocks 981000 (default tactical choices) and 983000 (last tactical choice).
 
 In v0.3.10, the Event tests cover reusing units with an empty or partial supply, donor limits, and the printed round-up rule for shaded Rival Caesars. All 229 tests passed. Seed blocks 1001000 (default tactical choices) and 1003000 (last tactical choice) reached scoring in all 384 campaigns.
+
+In v0.3.11, the audit tests cover the new Event donors, saved Raid donor counts and dice, and both Non-player Reinforce rules under St Germanus. Seed blocks 1031000 (default tactical choices) and 1033000 (last tactical choice) reached scoring in all 384 campaigns.
 
 ## References
 

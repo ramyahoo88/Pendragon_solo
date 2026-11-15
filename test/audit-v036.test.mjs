@@ -314,5 +314,5 @@ test('Unconfirmed Omens counts are separate from committed choices in a saved pr
   const result = replayAction(session.game,record.job,[...reloaded.answers,reloaded.countDraft.values.join(',')])
   assert.match(result.detail,/Omens halves 8 Units/)
   record.countDraft.index++
-  assert.throws(() => parseSave(serialize(session)),/Invalid unconfirmed Omens counts/)
+  assert.throws(() => parseSave(serialize(session)),/Invalid unconfirmed piece counts/)
 })
