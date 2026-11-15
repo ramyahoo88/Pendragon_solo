@@ -237,6 +237,7 @@ export function barbarianReturn(state,faction,roll,{allowedFeat = true, oneSpace
     changeTrack(state,faction,cargo)
     notes.push(`${name} · ${count} Raiders return, +${cargo} Renown`)
   }
+  let addedBySettle = false
   for (const choice of choices) {
     const {name,raiders} = choice
     const space = state.land[name]
@@ -252,12 +253,11 @@ export function barbarianReturn(state,faction,roll,{allowedFeat = true, oneSpace
     if (raiders) notes.push(`${name} · ${converted} of ${raiders} Raiders become Warbands`)
     const changes = settlementChange(state,name,faction,faction === 'x')
     if (changes.length) notes.push(`${name} · ${changes.join(', ')}`)
-    else {
-      const bought = buySettledWarbands(state,name,faction,controlledAtOutset.has(name))
-      if (bought) notes.push(`${name} · pay 3 Renown for ${bought} Warbands`)
-    }
+    const bought = changes.length ? 0 : buySettledWarbands(state,name,faction,controlledAtOutset.has(name))
+    if (bought) notes.push(`${name} · pay 3 Renown for ${bought} Warbands`)
+    addedBySettle ||= converted > 0 || changes.length > 0 || bought > 0
   }
-  if (choices.length) return {feat:'Settle',notes}
+  if (addedBySettle || (faction === 's' && choices.length)) return {feat:'Settle',notes}
   const entreat = allowedFeat && faction === 's' && doEntreat(state,roll)
   if (entreat) notes.push(entreat)
   return {feat:entreat ? 'Entreat' : null,notes}
@@ -542,7 +542,7 @@ function saxonBattleGoal(outcome,{count,mayEvade}) {
   return outcome.destroyed.length > 0 ||
     (count > 0 && !mayEvade && outcome.defenderLosses-outcome.destroyed.length >= count)
 }
-function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enemyFilter,requireDestruction = false},roll) {
+function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enemyFilter,requireDestruction = false,interceptBattles},roll) {
   const candidates = []
   const militiaRoll = () => roll(6,'Civitates Battle · Plunder threshold')
   let lootThreshold
@@ -577,7 +577,8 @@ function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enem
       const possibleRaiders = ['xr','sr'].some(key => sides.includes(key[0]) && on(space,key))
       const mayEvade = !civ && !dux && possibleRaiders
       let want = false
-      if (dux) want = civilWar || outcome.prestigeChange > 0 || canTakePlunder
+      if (dux) want = civilWar || outcome.prestigeChange > 0 || canTakePlunder ||
+        interceptBattles?.some(target => target.name === name && target.defender === defender)
       let opensCivitatesBattle = false
       if (civ) {
         // The check ignores Ambush and Evasion. Withdrawal remains a legitimate defence.
@@ -604,7 +605,7 @@ function policyBattleRequests(state,faction,{oneSpace,allowedFeat,onlySpace,enem
   }
   // Dux does not start a Battle solely for civil-war movement. Civitates civil war
   // is an additional target after the ordinary Control/Plunder condition is met.
-  if (faction === 'd' && !candidates.some(item => item.outcome.prestigeChange > 0)) return null
+  if (faction === 'd' && !interceptBattles && !candidates.some(item => item.outcome.prestigeChange > 0)) return null
   if (faction === 'c' && !candidates.some(item => item.opensCivitatesBattle)) return null
   if (!candidates.length) return null
   const queue = []
@@ -1034,9 +1035,9 @@ function planDuxIntercept(start,roll,{oneSpace,allowedFeat,blueConsent,free=fals
   if (feat === 'Retaliate' && !battles.some(request => request.retaliate)) feat = null
   const engagements = sum(battles.map(({name,defender}) => on(draft.land[name],defender+'r')))
   for (const {name,defender} of battles) notes.push(`${name} · engage ${on(draft.land[name],defender+'r')} ${NAMES[defender]} Raiders`)
-  // If they cannot move or add a Feat, the Dux proceed to the Battle check.
-  if (engagements <= threshold || (!free && !moved && !feat)) return null
-  return {state:draft,requests:battles,feat,notes}
+  if (engagements <= threshold) return null
+  // §8.8.1 sends an eligible Intercept straight to Battle if no Troops move and no Feat applies.
+  return {state:draft,requests:battles,feat,notes,battleInstead:!free && !moved && !feat}
 }
 
 function duxBuild(state,roll,blueConsent = false) {
@@ -2092,6 +2093,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   }
   const current = card(state.current)
   const next = card(state.next)
+  const currentShield = shield(current.symbols[faction])
   const eventAllowed = !choices.myrddin && actionOptions(state).includes('event') &&
     (state.current >= 73 && state.current <= 76 || !eventBlocked(current,faction))
   const rule = {s:'8.5',x:'8.6',c:'8.7',d:'8.8'}[faction]
@@ -2110,11 +2112,12 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     base.rng = grantRoll ? state.rng : draft.rng
     return {mode:'battle',faction,title,description,dice,requests,rng:draft.rng,base,option:actionSlot(feat ? 'feat' : 'command')}
   }
-  const tryPolicyBattle = () => {
+  const tryPolicyBattle = interceptBattles => {
     const base = clone(draft)
-    const chosen = policyBattleRequests(base,faction,allowance,roll)
+    const chosen = policyBattleRequests(base,faction,{...allowance,interceptBattles},roll)
     if (!chosen) return null
     const plan = battlePlan(`Battle${chosen.feat ? ' + '+chosen.feat : ''}`,chosen.requests,chosen.notes.join('. '),chosen.feat,base)
+    if (interceptBattles) return explain(plan,'8.8.1','Intercept could engage enough Raiders, but would add no movement or Feat. Resolve Battle.')
     const [section,detail] = {
       d:['8.8.3','A Battle forecast gains Prestige.'],
       c:['8.7.1','A Battle forecast gains Control or exceeds the Plunder roll.'],
@@ -2133,7 +2136,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
       result = {...battlePlan(plan.label,plan.requests,plan.description,null,plan.base),option:'event',afterRaid:plan.afterRaid,overrides:plan.overrides}
     } else result = auto(plan.option,plan.label,plan.description,plan.base ?? draft,plan.overrides)
     if (isPivotalCard(current.id)) return explain(result,'8.1.3',`The declared Pivotal #${current.id} resolves first.`)
-    if (shield(current.symbols[faction])) return explain(result,priorityEvent,`Revealed Event #${current.id} shows a Shield for ${NAMES[faction]}.`)
+    if (currentShield) return explain(result,priorityEvent,`Revealed Event #${current.id} shows a Shield for ${NAMES[faction]}.`)
     return explain(result,optionalEvent,`The Event check selected effective Event #${current.id}.`)
   }
   if (!choices.myrddin && state.current >= 73 && state.current <= 76 && !state.acts.length) {
@@ -2147,7 +2150,10 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
   }
   if (faction === 'd') {
     const intercept = planDuxIntercept(draft,roll,allowance)
-    if (intercept) return explain(battlePlan(`Intercept${intercept.feat ? ' + '+intercept.feat : ''}`,intercept.requests,intercept.notes.join('. '),intercept.feat,intercept.state),
+    if (intercept?.battleInstead) {
+      const battle = tryPolicyBattle(intercept.requests)
+      if (battle) return battle
+    } else if (intercept) return explain(battlePlan(`Intercept${intercept.feat ? ' + '+intercept.feat : ''}`,intercept.requests,intercept.notes.join('. '),intercept.feat,intercept.state),
       '8.8.1','The Raiders that Dux can engage in Friendly Control exceed the 2D6 roll.')
   }
   if (['x','s'].includes(faction)) {
@@ -2169,10 +2175,11 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const battle = tryPolicyBattle()
     if (battle) return battle
   }
-  if (eventAllowed && shield(current.symbols[faction])) {
+  if (eventAllowed && currentShield) {
     const result = resolveEvent()
     if (result) return result
-  } else if (!choices.myrddin && next && next.order.indexOf(faction) < 2 && shield(next.symbols[faction])) {
+  }
+  if (!choices.myrddin && next && next.order.slice(0,2).includes(faction) && shield(next.symbols[faction])) {
     return explain(auto('pass','Pass',`Priority Event #${next.id} shows ${NAMES[faction]} in the first two positions.`),priorityEvent,
       `The next revealed card has a Shield in position ${next.order.indexOf(faction)+1}.`)
   }
@@ -2186,7 +2193,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const availableTroops = pool.mil+pool.com
     const musterRoll = roll(6,'Civitates Muster · first die')+roll(6,'Civitates Muster · second die')
     const tryMuster = availableTroops > musterRoll || civMusterImprovesControl(state)
-    if (!tryMuster && eventAllowed) {
+    if (!tryMuster && eventAllowed && !currentShield) {
       const result = resolveEvent()
       if (result) return result
     }
@@ -2224,7 +2231,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
       return explain(auto(training.feat ? 'feat' : 'command',`Train${training.feat ? ' + '+training.feat : ''}`,[...training.placements,...training.notes].join(' ')),
         '8.8.4','Dux can afford to place at least two Cavalry.')
     }
-    if (eventAllowed && roll(6,'Dux Event choice') <= 4) {
+    if (eventAllowed && roll(6,'Dux Event choice') <= 4 && !currentShield) {
       const result = resolveEvent()
       if (result) return result
     }
@@ -2239,8 +2246,9 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     const march = planBarbarianMarch(draft,faction,roll,allowance)
     if (march?.feat) return explain(auto('feat',march.title,march.desc,march.state),'8.6.3','The March roll is 1 or 2 and Settle can add a piece or Population.')
     if (settleWithoutReturn(draft,faction,null)) {
-      const result = barbarianReturn(draft,faction,roll,{...allowance,forSettle:true})
-      if (result?.feat) return explain(auto('feat','Return + '+result.feat,result.notes.join('. ')),'8.6.3','Settle can add something without moving Warbands, so Return accompanies it.')
+      const returning = clone(draft)
+      const result = barbarianReturn(returning,faction,roll,{...allowance,forSettle:true})
+      if (result?.feat) return explain(auto('feat','Return + '+result.feat,result.notes.join('. '),returning),'8.6.3','Settle can add something without moving Warbands, so Return accompanies it.')
     }
   }
   if (hasWarbands) {
@@ -2252,7 +2260,7 @@ export function proposeBot(state, scripted = [], choices = {}, grantRoll = null)
     }
   }
   const freeRaiders = availability(state)[faction+'r']
-  if (eventAllowed && (freeRaiders+(faction === 's' ? state.tracks.niall : 0) < (faction === 's' ? 25 : 20) || roll(6,'Raid or Event') >= 5)) {
+  if (eventAllowed && (freeRaiders+(faction === 's' ? state.tracks.niall : 0) < (faction === 's' ? 25 : 20) || roll(6,'Raid or Event') >= 5) && !currentShield) {
     const result = resolveEvent()
     if (result) return result
   }
